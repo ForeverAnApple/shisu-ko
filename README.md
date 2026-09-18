@@ -21,9 +21,9 @@ both into the Anki card you just made.
   dictionary) scans them. Hovering pauses the video; moving into the dictionary popup keeps it
   paused; moving back over the video resumes.
 - **Transcript panel** with every line so far. Click a timestamp to jump there.
-- **Sentence mining.** The mine button on a subtitle, on any transcript line, or Alt+Shift+M
-  captures a screenshot and an MP3 clip of that sentence and either attaches them to the newest
-  Anki card via AnkiConnect or saves them to your Downloads folder.
+- **Sentence mining.** A screenshot and an MP3 clip of the sentence go into the card Yomitan just
+  made, by themselves. The mine button on a subtitle, on any transcript line, or Alt+Shift+M does
+  the same on demand, into the newest Anki card or into your Downloads folder.
 - **Your hardware, your choice of model.** Whisper large-v3 by default; one flag switches to
   `kotoba-whisper-v2.0-faster` (Japanese-specialised, about 6x faster) or a small CPU model.
 - **Native or Docker.** A one-time setup script on Windows/Linux/macOS, or a container with
@@ -64,6 +64,7 @@ long segments into subtitle-sized cues at Japanese punctuation. Cues are saved p
 - Firefox 140 or newer.
 - For the native server: Python 3.10 or newer on the PATH, plus Node.js 20+ or Deno
   (yt-dlp needs a JavaScript runtime for YouTube).
+  On Nix the flake provides all of this.
 - For the Docker server: Docker with the NVIDIA Container Toolkit (Docker Desktop on Windows
   has it built in). The image already contains Deno.
 - An NVIDIA GPU with about 4 GB of free VRAM for large-v3. With less free memory the server
@@ -84,6 +85,12 @@ downloads the Whisper large-v3 model (about 3 GB) into `~/.shisu-ko/models`. The
 when it prints `Listening on http://127.0.0.1:8790`. Keep the window open while you watch; it
 restarts itself if it ever crashes.
 
+**Nix / NixOS:** `nix run github:ForeverAnApple/shisu-ko` (or `nix run .` in a checkout) starts the
+server with CUDA support; `nix run .#check` prints diagnostics; `nix develop` opens a shell with
+Python, web-ext, Node and Deno for development. The flake builds CTranslate2 with CUDA from the
+`cache.nixos-cuda.org` binary cache, so add it to your substituters or expect a long build. To keep the
+server running in the background: `systemd-run --user --unit=shisu-ko nix run /path/to/shisu-ko`.
+
 **Docker:** copy `.env.example` to `.env`, set `DATA_DIR` to where models and caches should
 live, then run `docker\up.cmd` (Windows) or `docker compose up -d`. See [Docker](#docker) below.
 
@@ -93,6 +100,8 @@ Temporary install (until Firefox restarts):
 
 1. Open `about:debugging#/runtime/this-firefox`.
 2. Click **Load Temporary Add-on…** and choose `addon/manifest.json`.
+3. Firefox asks for access to youtube.com the first time you open the popup; click **Allow on
+   YouTube** (or right-click the toolbar icon > Always Allow on www.youtube.com).
 
 Permanent install: download the signed `shisu-ko-<version>-signed.xpi` from the
 [latest release](https://github.com/Multysquid/shisu-ko/releases/latest) and open it in Firefox.
@@ -112,6 +121,7 @@ server stays ahead of you. The toolbar popup holds all settings.
 | Alt+Shift+S | Toggle subtitles |
 | Alt+Shift+T | Toggle the transcript panel |
 | Alt+Shift+M | Mine the current sentence (screenshot + audio) |
+| ← / → | Jump to the previous / next subtitle (Left replays the current line when more than a second in; turn off in the popup) |
 
 Shortcuts can be changed in Firefox under Add-ons and themes > Manage Extension Shortcuts.
 
@@ -127,7 +137,10 @@ timestamps seek the video.
 
 Mining captures two things for the sentence you are looking at: a screenshot of the video frame
 and an MP3 clip of the sentence audio, cut from the original track with a little padding on both
-sides. Three ways to trigger it:
+sides. A long sentence is shown as several short subtitle lines, but mining always works on the
+whole sentence: the clip spans it, and the card's sentence field is grown from the single line
+Yomitan copied to the full sentence, keeping the bold around the word you looked up. It runs by
+itself the moment Yomitan adds a card. To trigger it by hand instead:
 
 - hover the subtitle and click the pickaxe button that appears at its right edge,
 - press Alt+Shift+M while watching,
@@ -136,19 +149,27 @@ sides. Three ways to trigger it:
 
 Where the material goes is a popup setting:
 
-**Anki (default).** Shisu-ko talks to AnkiConnect, finds the card added most recently today, and
-fills its image and audio fields. This matches the usual Yomitan workflow:
+**Anki (default).** Normally you never trigger mining at all:
 
-1. Hover a word, click Yomitan's **+** to create the card (Yomitan fills the word, reading,
-   sentence and glossary from its own template).
-2. Press Alt+Shift+M. Shisu-ko uploads `shisuko_<video>_<time>.jpg` and `.mp3` to Anki's media
-   folder and writes `<img src=...>` and `[sound:...]` into the fields.
+1. Hover the subtitle; the video pauses.
+2. Scan the word with Yomitan and click its **+** (Yomitan fills word, reading, sentence and
+   glossary from its own template).
+3. Within a second Shisu-ko notices the new card and uploads `shisuko_<video>_<time>.jpg` and
+   `.mp3` to Anki's media folder, writing `<img src=...>` and `[sound:...]` into the fields. The
+   screenshot is the frame that was on screen when you hovered the line, and playback is left
+   alone so you can keep reading the popup.
+
+Shisu-ko only touches a card that appeared while you were watching, and only when its sentence
+matches the subtitle, so an import or a card made elsewhere is never overwritten. Turn the
+watching off with **Attach automatically…** in the popup; the shortcut and the pickaxe keep
+working either way, and they attach to the newest card added today.
 
 The first time, Anki shows a dialog asking whether to allow the extension; click **Yes**.
 Field names default to `Picture` and `SentenceAudio` (as used by common Japanese mining note
 types); change them in the popup to match your note type. An optional sentence field is filled
 with the subtitle text only when it is empty, so it never overwrites what Yomitan wrote. If Anki
-is not running, the files are saved to Downloads instead (can be turned off).
+is not running, mining by hand saves the files to Downloads instead (can be turned off); the
+automatic path stays quiet and writes nothing.
 
 **Downloads.** Files are saved to `Downloads/shisu-ko-mining/`, ready to drag into any card.
 
@@ -156,6 +177,13 @@ Notes: DRM-protected videos block screenshots (the audio clip still works). The 
 uses port 8790 precisely so that AnkiConnect can keep its default 8765.
 
 ## Settings (toolbar popup)
+
+![Popup, dark theme](docs/images/popup-dark.png)
+
+Subtitle style settings live in their own drawer; the screenshot below shows mincho, a raised
+position, a lighter box, an outline, and the transcript docked left:
+
+![Overlay with custom style](docs/images/overlay-styled.png)
 
 | Setting | Meaning |
 |---|---|
@@ -165,6 +193,14 @@ uses port 8790 precisely so that AnkiConnect can keep its default 8765.
 | Hide YouTube's own captions | Avoids two subtitle layers |
 | Show progress messages | The status badge; errors are always shown |
 | Font size, keep subtitle after speech ends | Presentation; the linger time keeps short lines readable |
+| Height above the bottom | Where the subtitle box sits, 2-40% of the player height; it still drops when YouTube's controls fade out |
+| Font | Gothic (the default stack), Gothic bold, Rounded or Mincho, for the subtitle and the transcript |
+| Text colour | Colour of the subtitle text |
+| Background | Opacity of the black box behind the text, 0-100% |
+| Outline the text | Black outline instead of the box; readable over bright video with the background turned down |
+| Transcript panel side | Docks the panel right or left; the subtitle moves out of its way |
+| Reset style | Restores the six settings above and nothing else |
+| Attach automatically when Yomitan adds a card | Watches AnkiConnect and fills the new card by itself; off means Alt+Shift+M or the pickaxe |
 | Send screenshot and audio to | Anki (newest card) or Downloads |
 | AnkiConnect URL, image/audio/sentence field | AnkiConnect connection and note fields |
 | Audio padding, audio format | Extra time around the sentence; MP3 or WAV |
@@ -223,6 +259,7 @@ The extension does not change between native and Docker; both listen on `127.0.0
 
 | Symptom | Fix |
 |---|---|
+| No subtitles until the toolbar icon is clicked | Firefox has not granted access to youtube.com yet. Open the popup and click **Allow on YouTube**. |
 | Badge says "Shisu-ko server offline" | Start `server\run.cmd` or `docker\up.cmd`. Check the server URL in the popup. |
 | First start sits at "Loading Whisper model" for a long time | The 3 GB download runs at your connection speed. Hugging Face's xet transfer mode is disabled because it stalled on Windows; set `HF_HUB_DISABLE_XET=0` to try it. |
 | "yt-dlp needs Node.js or Deno" | Install [Node.js](https://nodejs.org/) 20+ or [Deno](https://deno.com/), then restart the server. |
@@ -266,6 +303,8 @@ AGENTS.md             architecture notes, invariants and gotchas for contributor
 
 ## Development
 
+- Nix: `nix develop` gives the Python environment, `web-ext`, Node and Deno; `nix run .#tests`
+  runs both test suites; `nix build .#addon` produces the extension zip.
 - Extension: `node --check addon/*.js`, `npx web-ext lint --source-dir addon`,
   `npx web-ext build --source-dir addon --artifacts-dir dist --ignore-files "tests/**"` (the tests folder is not shipped).
 - Server: `python -W error -c "import ast; ast.parse(open('server/server.py').read())"`,
@@ -281,7 +320,7 @@ run in CI (see the badge at the top of this file) on every push and pull request
 [`.github/workflows/tests.yml`](.github/workflows/tests.yml).
 
 **Server** (`server/tests/`): window planning (`plan_window`), interval merging, cue splitting
-(`split_segment`), timestamp formatting, error message mapping, and the on-disk cue cache.
+(`build_cues`, the hallucination gates), timestamp formatting, error message mapping, and the on-disk cue cache.
 
 ```
 pip install -r server/requirements-test.txt

@@ -1,0 +1,397 @@
+"""Unit tests for the cue pipeline: VAD helpers, hallucination gates and build_cues.
+
+The rules under test are the ones written down in docs/subtitle-quality.md, sections
+P0.1 (speech intervals), P0.2 (hallucination gates) and P1 (cue geometry). Nothing here
+touches a model, the GPU or the network: synthetic word lists in, cues out.
+"""
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+from _serverlib import load_server
+
+server = load_server()
+W = server.Word
+
+
+def limits(**overrides):
+    return server.CueLimits(**overrides)
+
+
+def words(spec, prob: float = 0.9):
+    """[("text", start, end), ...] -> [Word]."""
+    return [W(text, start, end, prob) for text, start, end in spec]
+
+
+def seg(text: str, start: float, end: float, ws=None, compression: float = 1.0):
+    return SimpleNamespace(text=text, start=start, end=end, words=ws, compression_ratio=compression)
+
+
+# --------------------------------------------------------------------------- interval helpers
+
+def test_interval_overlap_counts_only_the_covered_part():
+    assert server.interval_overlap(0.0, 4.0, [[1.0, 2.0], [3.0, 10.0]]) == pytest.approx(2.0)
+
+
+def test_speech_ratio_of_a_cue_fully_inside_speech_is_one():
+    assert server.speech_ratio(1.0, 2.0, [[0.0, 5.0]]) == pytest.approx(1.0)
+
+
+def test_distance_to_speech_is_zero_without_intervals():
+    # No VAD data must never make the trimmer eat every word.
+    assert server.distance_to_speech(99.0, []) == 0.0
+
+
+def test_distance_to_speech_measures_the_nearest_edge():
+    assert server.distance_to_speech(6.0, [[0.0, 5.0], [8.0, 9.0]]) == pytest.approx(1.0)
+
+
+def test_next_silence_starts_at_the_end_of_the_containing_interval():
+    assert server.next_silence(2.0, [[0.0, 3.0], [5.0, 6.0]]) == (3.0, 5.0)
+
+
+def test_next_silence_is_unbounded_when_no_speech_follows():
+    start, end = server.next_silence(4.0, [[0.0, 3.0]])
+    assert (start, end) == (4.0, float("inf"))
+
+
+def test_silence_around_reports_zero_for_unknown_neighbours():
+    # At a window edge there is no interval before, which must not read as isolation.
+    assert server.silence_around(1.0, 2.0, [[0.9, 2.1]]) == (0.0, 0.0)
+
+
+def test_silence_around_measures_from_the_utterance_own_interval():
+    # The cue sits on its own speech island: the silence is measured from that island outwards.
+    before, after = server.silence_around(5.0, 6.0, [[0.0, 1.0], [5.0, 6.0], [10.0, 11.0]])
+    assert (before, after) == (4.0, 4.0)
+
+
+def test_silence_around_of_an_isolated_cue():
+    before, after = server.silence_around(5.0, 6.0, [[0.0, 1.0], [10.0, 11.0]])
+    assert (before, after) == (4.0, 4.0)
+
+
+def test_nearest_onset_ignores_a_cue_deep_inside_an_interval():
+    assert server.nearest_onset([[0.0, 30.0]], 12.0, reach=0.6) is None
+    assert server.nearest_onset([[0.0, 30.0]], 0.4, reach=0.6) == 0.0
+
+
+# --------------------------------------------------------------------------- VAD API pin
+
+def test_faster_whisper_vad_api_is_still_there():
+    # faster_whisper.vad is not in the package __all__; this is the canary for an upgrade.
+    pytest.importorskip("faster_whisper")
+    from faster_whisper.vad import VadOptions, get_speech_timestamps  # noqa: F401
+
+    options = VadOptions(**server.VAD_PARAMS, max_speech_duration_s=server.VAD_MAX_SPEECH_SECONDS)
+    assert options.min_speech_duration_ms == 250
+    assert options.neg_threshold == 0.35
+
+
+def test_vad_parameters_returns_a_fresh_dict_each_time():
+    # transcribe() pops keys out of the dict it is handed.
+    a = server.vad_parameters()
+    a.pop("threshold")
+    assert "threshold" in server.vad_parameters()
+
+
+# --------------------------------------------------------------------------- hallucination gates
+
+def test_gate_drops_a_segment_without_words():
+    assert server.hallucination_reason(seg("テキスト", 0.0, 1.0), [], [[0.0, 1.0]]) == "empty"
+
+
+def test_gate_drops_punctuation_only_text():
+    ws = words([("...", 0.0, 1.0)])
+    assert server.hallucination_reason(seg("...", 0.0, 1.0), ws, [[0.0, 1.0]]) == "empty"
+
+
+def test_gate_keeps_a_normal_segment_on_speech():
+    ws = words([("これは", 0.0, 0.5), ("テストです", 0.5, 1.2)])
+    assert server.hallucination_reason(seg("これはテストです", 0.0, 1.2), ws, [[0.0, 1.5]]) is None
+
+
+def test_vad_gate_drops_a_short_segment_off_speech():
+    ws = words([("あっ", 10.0, 10.6)])
+    assert server.hallucination_reason(seg("あっ", 10.0, 10.6), ws, [[0.0, 5.0]]) == "vad"
+
+
+def test_vad_gate_keeps_a_long_confident_segment_off_speech():
+    ws = words([("これはかなり", 10.0, 10.8), ("長い文章です", 10.8, 11.6)], prob=0.8)
+    assert server.hallucination_reason(seg("これはかなり長い文章です", 10.0, 11.6), ws, [[0.0, 5.0]]) is None
+
+
+def test_vad_gate_drops_a_long_segment_off_speech_when_the_model_is_unsure():
+    ws = words([("これはかなり", 10.0, 10.8), ("長い文章です", 10.8, 11.6)], prob=0.2)
+    assert server.hallucination_reason(seg("これはかなり長い文章です", 10.0, 11.6), ws, [[0.0, 5.0]]) == "vad"
+
+
+def test_anomaly_gate_drops_improbable_words_with_partial_speech_overlap():
+    ws = words([("あ", 0.0, 0.05), ("い", 0.05, 0.10), ("う", 0.10, 0.15), ("えおかきくけ", 0.15, 0.20)], prob=0.05)
+    # Half the span is speech, so the VAD gate passes it on the length/probability exception path.
+    assert server.hallucination_reason(seg("あいうえおかきくけ", 0.0, 0.2), ws, [[0.0, 0.1]]) in ("anomaly", "vad")
+    ws_long = words([("あいうえおかきくけこ", 0.0, 0.05), ("さしすせそたちつてと", 0.05, 0.10)], prob=0.05)
+    assert server.hallucination_reason(seg("あいうえおかきくけこさしすせそたちつてと", 0.0, 0.1), ws_long, [[0.0, 0.08]]) == "anomaly"
+
+
+def test_anomaly_gate_keeps_an_anomalous_segment_that_sits_on_speech():
+    ws = words([("あいうえおかきくけこ", 0.0, 0.05), ("さしすせそたちつてと", 0.05, 0.10)], prob=0.05)
+    assert server.hallucination_reason(seg("あいうえおかきくけこさしすせそたちつてと", 0.0, 0.1), ws, [[0.0, 1.0]]) is None
+
+
+def test_is_segment_anomaly_ignores_punctuation_only_words():
+    assert server.is_segment_anomaly(words([("。", 0.0, 0.01)])) is False
+
+
+def test_repetition_gate_drops_a_looping_segment():
+    text = "ありがとうございますありがとうございますありがとうございます"
+    ws = words([(text, 0.0, 4.0)])
+    assert server.hallucination_reason(seg(text, 0.0, 4.0), ws, [[0.0, 4.0]]) == "repetition"
+
+
+def test_repetition_gate_keeps_ordinary_text():
+    text = "今日は天気がいいので散歩に行きます"
+    ws = words([(text, 0.0, 4.0)])
+    assert server.hallucination_reason(seg(text, 0.0, 4.0), ws, [[0.0, 4.0]]) is None
+
+
+def test_repetition_gate_uses_the_compression_ratio_too():
+    text = "".join(f"これは{i}番目のテストの文章です。" for i in range(14))  # no exact run, still very compressible
+    ws = words([(text, 0.0, 8.0)])
+    assert not server.has_repetition(text)
+    assert server.compression_ratio(text) > server.COMPRESSION_LIMIT
+    assert server.hallucination_reason(seg(text, 0.0, 8.0), ws, [[0.0, 8.0]]) == "repetition"
+
+
+def test_repetition_gate_ignores_the_chunk_wide_compression_ratio():
+    # faster-whisper gives every segment of a 30 s decode the same compression_ratio, so a loop
+    # elsewhere in the chunk must not delete this line.
+    text = "はいかしこまりました"
+    ws = words([(text, 0.0, 1.5)])
+    assert server.hallucination_reason(seg(text, 0.0, 1.5, compression=3.4), ws, [[0.0, 1.6]]) is None
+
+
+def test_has_repetition_keeps_japanese_backchannels():
+    for ok in ("そうそう", "そうそうそう", "そうそうそうそう", "違う違う違う", "シューシューシュー"):
+        assert not server.has_repetition(ok), ok
+
+
+def test_has_repetition_catches_long_runs_and_long_loops():
+    assert server.has_repetition("ああああああ")  # six repeats
+    assert server.has_repetition("おはようございますおはようございますおはようございます")  # three, but 30 chars
+
+
+def test_blocklist_drops_a_sign_off_isolated_by_silence():
+    text = "ご視聴ありがとうございました"
+    ws = words([(text, 10.0, 12.0)])
+    speech = [[0.0, 5.0], [10.0, 12.0], [20.0, 25.0]]
+    assert server.hallucination_reason(seg(text, 10.0, 12.0), ws, speech) == "blocklist"
+
+
+def test_blocklist_keeps_a_sign_off_in_the_middle_of_speech():
+    text = "ご視聴ありがとうございました"
+    ws = words([(text, 10.0, 12.0)])
+    speech = [[8.0, 14.0]]
+    assert server.hallucination_reason(seg(text, 10.0, 12.0), ws, speech) is None
+
+
+# --------------------------------------------------------------------------- build_cues
+
+def test_build_cues_trims_a_stretched_leading_word():
+    # Whisper stretched "えー" back into a silence; its midpoint is far outside speech.
+    ws = words([("えー", 0.0, 2.0), ("こんにちは", 5.0, 5.8), ("。", 5.8, 5.9)])
+    speech = [[4.9, 6.2]]
+    cues = server.build_cues(ws, speech, limits())
+    assert len(cues) == 1
+    assert cues[0]["text"] == "こんにちは。"
+    assert cues[0]["start"] == pytest.approx(4.9, abs=0.1)
+
+
+def test_build_cues_keeps_edge_words_that_sit_on_speech():
+    ws = words([("あの", 5.0, 5.3), ("こんにちは", 5.3, 5.9)])
+    cues = server.build_cues(ws, [[4.9, 6.0]], limits())
+    assert [c["text"] for c in cues] == ["あのこんにちは"]
+
+
+def test_build_cues_splits_on_a_pause_that_is_real_silence():
+    ws = words([("こんにちは", 0.0, 1.0), ("さようなら", 3.0, 4.0)])
+    speech = [[0.0, 1.1], [2.9, 4.1]]
+    cues = server.build_cues(ws, speech, limits())
+    assert [c["text"] for c in cues] == ["こんにちは", "さようなら"]
+
+
+def test_build_cues_does_not_split_a_pause_that_is_still_speech():
+    # A 0.5 s inter-word gap that Silero calls speech (a drawn-out vowel) is not a cue break.
+    ws = words([("こんにちは", 0.0, 1.0), ("さようなら", 1.5, 2.4)])
+    cues = server.build_cues(ws, [[0.0, 2.5]], limits())
+    assert [c["text"] for c in cues] == ["こんにちはさようなら"]
+
+
+def test_build_cues_snaps_the_start_to_the_speech_onset():
+    ws = words([("こんにちは", 5.4, 6.0), ("。", 6.0, 6.1)])
+    cues = server.build_cues(ws, [[5.0, 6.3]], limits())
+    assert cues[0]["start"] == pytest.approx(5.30)  # onset 5.0 + the 0.30 s cap
+
+
+def test_build_cues_leaves_a_mid_interval_cue_where_it_is():
+    ws = words([("あいうえおかきくけこさしすせそ", 10.0, 12.0), ("。", 12.0, 12.1)])
+    cues = server.build_cues(ws, [[0.0, 30.0]], limits())
+    assert cues[0]["start"] == pytest.approx(10.0)
+
+
+def test_build_cues_adds_a_lead_out_into_the_following_silence():
+    ws = words([("あいうえおかきくけこ", 0.0, 2.0), ("。", 2.0, 2.1)])
+    cues = server.build_cues(ws, [[0.0, 2.2], [9.0, 10.0]], limits())
+    assert cues[0]["end"] == pytest.approx(2.6)  # +LEAD_OUT 0.5
+
+
+def test_build_cues_does_not_lead_out_into_the_next_utterance():
+    ws = words([("あいうえおかきくけこ", 0.0, 2.0), ("。", 2.0, 2.1)])
+    cues = server.build_cues(ws, [[0.0, 2.2], [2.35, 5.0]], limits())
+    assert cues[0]["end"] == pytest.approx(2.1)  # the silence is only 0.15 s
+
+
+def test_build_cues_extends_a_short_cue_to_the_minimum_duration():
+    ws = words([("はい", 0.0, 0.3), ("。", 0.3, 0.35)])
+    cues = server.build_cues(ws, [[0.0, 0.4], [9.0, 10.0]], limits())
+    assert cues[0]["end"] - cues[0]["start"] == pytest.approx(0.85, abs=0.06)
+
+
+def test_build_cues_merges_a_short_cue_into_its_neighbour():
+    ws = words([("はい", 0.0, 0.3), ("。", 0.3, 0.35), ("そうですね", 0.6, 1.4), ("。", 1.4, 1.5)])
+    cues = server.build_cues(ws, [[0.0, 1.6]], limits())
+    assert [c["text"] for c in cues] == ["はい。そうですね。"]
+
+
+def test_build_cues_does_not_merge_past_the_character_limit():
+    ws = words([("あいうえおかきくけこさしすせそ", 0.0, 2.0), ("。", 2.0, 2.1),
+                ("たちつてとなにぬねのはひふへほ", 2.2, 4.0), ("。", 4.0, 4.1)])
+    cues = server.build_cues(ws, [[0.0, 4.2]], limits(max_chars=20))
+    assert len(cues) == 2
+
+
+def test_build_cues_closes_a_blink_sized_gap():
+    ws = words([("あいうえおかきくけこ", 0.0, 2.0), ("。", 2.0, 2.05),
+                ("たちつてとなにぬねの", 2.4, 4.4), ("。", 4.4, 4.45)])
+    cues = server.build_cues(ws, [[0.0, 2.1], [2.35, 4.5]], limits(max_chars=12, merge_gap=0.0))
+    assert len(cues) == 2
+    assert cues[1]["start"] - cues[0]["end"] == pytest.approx(0.10)
+
+
+def test_build_cues_breaks_at_the_character_limit_on_a_clause_boundary():
+    ws = words([("あいうえおかきくけこ", 0.0, 2.0), ("、", 2.0, 2.1), ("さしすせそたちつてと", 2.1, 4.0),
+                ("。", 4.0, 4.1)])
+    cues = server.build_cues(ws, [[0.0, 4.2]], limits(max_chars=16, max_seconds=100.0))
+    assert [c["text"] for c in cues] == ["あいうえおかきくけこ、", "さしすせそたちつてと。"]
+
+
+def test_build_cues_breaks_at_the_duration_limit():
+    ws = words([("あいうえおかきくけ", 0.0, 4.0), ("こさしすせそたちつ", 4.0, 8.0)])
+    cues = server.build_cues(ws, [[0.0, 8.2]], limits(max_seconds=3.0, max_chars=100))
+    assert [c["text"] for c in cues] == ["あいうえおかきくけ", "こさしすせそたちつ"]
+
+
+def test_build_cues_never_returns_a_cue_over_the_duration_limit():
+    ws = words([(f"語{i}", float(i), float(i) + 1.0) for i in range(20)])
+    cues = server.build_cues(ws, [[0.0, 20.5]], limits())
+    assert cues
+    assert max(c["end"] - c["start"] for c in cues) <= 6.0 + 0.6
+
+
+def test_build_cues_on_empty_input():
+    assert server.build_cues([], [[0.0, 1.0]], limits()) == []
+
+
+# --------------------------------------------------------------------------- build_window_cues
+
+def test_build_window_cues_stamps_one_segment_id_per_segment():
+    ws_a = words([("あいうえおかきくけこさしすせそ", 0.0, 2.0), ("。", 2.0, 2.1),
+                  ("たちつてとなにぬねのはひふへほ", 2.2, 4.0), ("。", 4.0, 4.1)])
+    ws_b = words([("まみむめも", 6.0, 7.0), ("。", 7.0, 7.1)])
+    segs = [seg("".join(w.word for w in ws_a), 0.0, 4.1, ws_a),
+            seg("".join(w.word for w in ws_b), 6.0, 7.1, ws_b)]
+    cues, next_id = server.build_window_cues(segs, 0.0, [[0.0, 4.2], [5.9, 7.2]], limits(max_chars=20), 7)
+    assert next_id == 9
+    assert sorted({c["seg"] for c in cues}) == [7, 8]
+    assert len([c for c in cues if c["seg"] == 7]) == 2  # split for display, one spoken sentence
+
+
+def test_build_window_cues_applies_the_window_offset():
+    ws = words([("こんにちは", 1.0, 2.0), ("。", 2.0, 2.1)])
+    segs = [seg("こんにちは。", 1.0, 2.1, ws)]
+    cues, _ = server.build_window_cues(segs, 100.0, [[101.0, 102.2]], limits(), 0)
+    assert cues[0]["start"] == pytest.approx(101.0, abs=0.1)
+
+
+def test_build_window_cues_counts_what_each_gate_dropped():
+    good = words([("こんにちは", 0.0, 1.0), ("。", 1.0, 1.1)])
+    noise = words([("あ", 20.0, 20.4)])
+    drops: dict = {}
+    segs = [seg("こんにちは。", 0.0, 1.1, good), seg("あ", 20.0, 20.4, noise)]
+    cues, next_id = server.build_window_cues(segs, 0.0, [[0.0, 1.2]], limits(), 0, drops)
+    assert [c["text"] for c in cues] == ["こんにちは。"]
+    assert drops["vad"] == 1
+    assert next_id == 1
+
+
+# --------------------------------------------------------------------------- dedup (P1.8)
+
+def test_cue_overlaps_detects_a_reworded_boundary_segment():
+    a = {"start": 10.0, "end": 12.0, "text": "これはテストです"}
+    b = {"start": 10.2, "end": 12.1, "text": "これはテストだ"}
+    assert server.cue_overlaps(a, b)
+
+
+def test_cue_overlaps_is_false_for_neighbouring_cues():
+    a = {"start": 10.0, "end": 12.0, "text": "あ"}
+    b = {"start": 12.0, "end": 14.0, "text": "い"}
+    assert not server.cue_overlaps(a, b)
+
+
+def test_cue_overlaps_uses_the_shorter_cue():
+    long_cue = {"start": 0.0, "end": 10.0, "text": "長い"}
+    short_cue = {"start": 9.0, "end": 9.9, "text": "短い"}
+    assert server.cue_overlaps(long_cue, short_cue)
+
+
+def test_build_window_cues_keeps_the_lead_out_inside_the_window():
+    ws = words([("あいうえおかきくけこ", 0.0, 2.0), ("。", 2.0, 2.1)])
+    segs = [seg("あいうえおかきくけこ。", 0.0, 2.1, ws)]
+    cues, _ = server.build_window_cues(segs, 0.0, [[0.0, 2.2]], limits(), 0, None, window_end=2.3)
+    assert cues[0]["end"] == pytest.approx(2.3)  # 2.1 + LEAD_OUT would spill into the next window
+
+
+def test_build_window_cues_window_clamp_respects_the_hard_minimum():
+    ws = words([("はい", 2.0, 2.2), ("。", 2.2, 2.25)])
+    segs = [seg("はい。", 2.0, 2.25, ws)]
+    cues, _ = server.build_window_cues(segs, 0.0, [[1.9, 2.3]], limits(), 0, None, window_end=2.3)
+    assert cues[0]["end"] - cues[0]["start"] >= 0.5
+
+
+def test_build_window_cues_drops_a_cue_that_belongs_to_the_next_window():
+    ws = words([("こんにちは", 9.0, 9.8), ("。", 9.8, 9.9)])
+    segs = [seg("こんにちは。", 9.0, 9.9, ws)]
+    cues, _ = server.build_window_cues(segs, 0.0, [[8.9, 10.0]], limits(), 0, None, window_end=8.0)
+    assert cues == []
+
+
+# --------------------------------------------------------------------------- minimum duration
+
+def test_normalise_gaps_keeps_an_overlap_rather_than_flashing_a_cue():
+    cues = [{"start": 0.0, "end": 1.0, "text": "a"}, {"start": 0.3, "end": 2.0, "text": "b"}]
+    server.normalise_gaps(cues, limits())
+    assert cues[0]["end"] == pytest.approx(1.0)  # trimming to 0.2 s would be unreadable
+
+
+def test_normalise_gaps_closes_an_overlap_when_there_is_room():
+    cues = [{"start": 0.0, "end": 3.0, "text": "a"}, {"start": 2.0, "end": 4.0, "text": "b"}]
+    server.normalise_gaps(cues, limits())
+    assert cues[0]["end"] == pytest.approx(1.9)
+
+
+def test_build_cues_never_emits_a_cue_under_the_hard_minimum():
+    ws = words([("あ", 0.0, 0.1), ("。", 0.1, 0.12), ("いうえおかきくけこさ", 0.2, 2.0), ("。", 2.0, 2.1)])
+    cues = server.build_cues(ws, [[0.0, 2.2]], limits(max_chars=6))
+    assert min(c["end"] - c["start"] for c in cues) >= 0.5

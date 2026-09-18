@@ -31,6 +31,25 @@ test("popup.html has an input for every setting", () => {
   for (const key of Object.keys(schema)) assert.ok(ids.has(key), `popup.html has no input with id="${key}"`);
 });
 
+// Firefox MV3 grants host permissions only when the user asks for them, and it will not even offer
+// the YouTube origins unless the manifest lists them, so a content script match with no matching
+// host permission can never run on a normal page load.
+test("every content script match is a host permission, and YouTube is listed", () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(ADDON, "manifest.json"), "utf8"));
+  const hosts = new Set(manifest.host_permissions);
+  for (const origin of ["*://www.youtube.com/*", "*://m.youtube.com/*", "*://youtube.com/*"]) {
+    assert.ok(hosts.has(origin), `host_permissions is missing ${origin}`);
+  }
+  for (const entry of manifest.content_scripts) {
+    for (const match of entry.matches) assert.ok(hosts.has(match), `content script match ${match} is not a host permission`);
+  }
+});
+
+test("the content script runs as soon as the DOM is there, not after load", () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(ADDON, "manifest.json"), "utf8"));
+  for (const entry of manifest.content_scripts) assert.equal(entry.run_at, "document_end");
+});
+
 test("settings.js is loaded before the scripts that use it", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(ADDON, "manifest.json"), "utf8"));
   assert.deepEqual(manifest.background.scripts, ["settings.js", "background.js"]);

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Shisu-ko",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Live Japanese subtitles for YouTube from a local Whisper server, scannable with Yomitan, with one-key screenshot and audio mining into Anki.",
   "browser_specific_settings": {
     "gecko": {
@@ -16,9 +16,13 @@
   },
   "permissions": [
     "storage",
-    "downloads"
+    "downloads",
+    "tabs"
   ],
   "host_permissions": [
+    "*://www.youtube.com/*",
+    "*://m.youtube.com/*",
+    "*://youtube.com/*",
     "http://127.0.0.1/*",
     "http://localhost/*"
   ],
@@ -42,7 +46,7 @@
       "css": [
         "content.css"
       ],
-      "run_at": "document_idle"
+      "run_at": "document_end"
     }
   ],
   "action": {

@@ -34,10 +34,25 @@ function btoa(binary) {
   return Buffer.from(binary, "binary").toString("base64");
 }
 
+// background.js caches the settings and drops the cache when storage.onChanged reports a write, so
+// the sandbox has to deliver that event the way Firefox does: after every storage.local.set.
+function notifyingStorage(storage, listeners) {
+  return {
+    get: (key) => storage.get(key),
+    async set(patch) {
+      const before = await storage.get(undefined);
+      await storage.set(patch);
+      const changes = {};
+      for (const key of Object.keys(patch)) changes[key] = { oldValue: before[key], newValue: patch[key] };
+      for (const fn of listeners.onChanged.slice()) fn(changes, "local");
+    },
+  };
+}
+
 function loadBackground(overrides = {}) {
   const source = fs.readFileSync(SOURCE_PATH, "utf8");
   const storage = overrides.storage || makeMemoryStorage();
-  const listeners = { onMessage: [], onCommand: [] };
+  const listeners = { onMessage: [], onCommand: [], onChanged: [] };
 
   const sandbox = {
     console,
@@ -50,7 +65,10 @@ function loadBackground(overrides = {}) {
       throw new Error("fetch() was not mocked for this test");
     }),
     browser: {
-      storage: { local: storage },
+      storage: {
+        local: notifyingStorage(storage, listeners),
+        onChanged: { addListener: (fn) => listeners.onChanged.push(fn) },
+      },
       downloads: {
         download: overrides.download || (async () => ({})),
       },
@@ -78,7 +96,8 @@ function loadBackground(overrides = {}) {
   // scripts run against the same context — so a second script can still see them by name and
   // copy them onto globalThis for the test harness to read.
   new vm.Script(
-    "globalThis.DEFAULT_SETTINGS = DEFAULT_SETTINGS; globalThis.REQUEST_TIMEOUT_MS = REQUEST_TIMEOUT_MS;",
+    "globalThis.DEFAULT_SETTINGS = DEFAULT_SETTINGS; globalThis.REQUEST_TIMEOUT_MS = REQUEST_TIMEOUT_MS;" +
+      " globalThis.ankiWatch = ankiWatch;",
     { filename: SOURCE_PATH }
   ).runInContext(sandbox);
 

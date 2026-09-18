@@ -15,6 +15,7 @@ addon/        Firefox extension, Manifest V3, plain JS, no build step
 server/       server.py (single file) + setup/run scripts; runtime data in ~/.shisu-ko
 docker/       Windows wrappers for docker compose, WSL Docker Engine installer
 Dockerfile, compose.yaml, compose.cpu.yaml, .env.example
+flake.nix        Nix package/app/dev shell for the server and the extension build
 sign-addon.cmd   signs the extension through addons.mozilla.org (needs the owner's API key)
 ```
 
@@ -46,12 +47,58 @@ sign-addon.cmd   signs the extension through addons.mozilla.org (needs the owner
 inside a covered range, a short `--first-window` (20 s) starts at the playhead; otherwise the next
 `--window` (40 s) continues from the end of the covered range, up to `--lookahead` seconds ahead.
 A segment touching the end of a window is dropped and the covered range ends where that segment
-began, so the next window re-transcribes it whole. Word timestamps split segments into cues at
-Japanese punctuation (`split_segment()`). These functions are pure; test them by importing the
+began, so the next window re-transcribes it whole. These functions are pure; test them by importing the
 module (register it in `sys.modules` before `exec_module` because of `from __future__ import annotations`).
+
+Cue building (`docs/subtitle-quality.md` is the rationale): the server runs Silero VAD itself on each
+window (`speech_intervals()`, min speech 250 ms, min silence 300 ms) and passes the same options to
+faster-whisper. Segments go through gates before becoming cues: no words, VAD overlap under 0.5,
+faster-whisper's own word-anomaly score, repetition loops, and a gated phrase blocklist.
+`build_cues(words, speech, limits)` then trims words outside speech, splits at sentence ends, long
+pauses and `--max-cue-chars`/`--max-cue-seconds`, snaps starts to speech onsets, adds a lead-out into
+following silence, merges fragments below `--min-cue-seconds`, and closes gaps under 0.5 s. Every cue
+carries `seg`, the id of the Whisper segment it came from, so the extension can rejoin a sentence for
+mining. Cue caches are format 2; older caches are ignored. `server/tools/cue_stats.py` and
+`retranscribe.py` measure a cache before and after a change; keep them working.
+
+Before the whole track is decoded (seconds for a long video), `Fetcher.make_preview()` decodes a
+minute around the playhead into `Session.preview` (`(offset, samples)`) and marks the session
+ready; `plan_window()` then only plans inside the preview and `audio_slice()` serves it. When the
+playhead is within the first minute, a yt-dlp progress hook already runs that preview on the growing
+`.part` file once enough bytes are in, so the first cues arrive while the download continues. The
+full decode replaces it with `Session.audio` and clears the preview.
+
+## How automatic mining works
+
+`ankiPoll()` in `addon/background.js` watches AnkiConnect so the viewer never presses anything:
+the content script asks once per sync tick (visible tab, no ad, not already mining) and the
+background answers with the id of a note Yomitan has just created. Four rules keep it from
+touching the wrong card.
+
+- Baseline. Every poll remembers the highest `findNotes("added:1")` id. It reports nothing when
+  that baseline cannot be trusted: first poll, previous poll failed, or more than 10 s since the
+  previous successful one. Notes added while Anki was closed or no video was open stay untouched.
+- One at a time. Two or more ids above the baseline mean an import or a sync, not a lookup, so
+  the baseline moves and nothing is reported.
+- Sentence guard. `addToAnki()` with an explicit note id compares `normalizeSentence()` of the
+  note's sentence field (`ankiSentenceField`, else `Sentence`) with the cue text; unless one
+  contains the other it returns `{ mismatch: true }` and writes nothing. Yomitan's `<b>` around
+  the looked-up word and any spacing difference normalise away.
+- No downloads fallback. `mineCue` with `auto: true` never falls back to the Downloads folder: a
+  failure the viewer did not ask for must not scatter files.
+
+Polls are throttled to one request per 250 ms (several tabs poll the same background), and the
+`requestPermission` handshake is retried at most once a minute until Anki grants it. Poll errors
+are logged with `console.debug`, never toasted. The screenshot comes from `state.hoverFrame`,
+captured on `mouseenter` of the subtitle, so the card shows the frame the viewer was reading and
+not whatever is on screen a Yomitan lookup later.
 
 ## Commands
 
+Nix (any Linux with flakes, NixOS): `nix run . -- [options]` starts the server with CUDA
+(`flake.nix`; CTranslate2 comes prebuilt from `cache.nixos-cuda.org`, onnxruntime is the CPU build
+because only the VAD uses it). `nix run .#check`, `nix run .#tests`, `nix build .#addon`,
+`nix develop` for a shell with Python, web-ext, Node and Deno. `.#server-cpu` is the CUDA-free variant.
 Native server (Windows): `server\setup.cmd` once, then `server\run.cmd [options]`.
 Native server (Linux/macOS): `bash server/setup.sh`, then `server/run.sh`.
 Diagnostics: `server\run.cmd --check`.
@@ -82,8 +129,10 @@ node --test addon/tests/*.test.js
 `background.js` in a Node `vm` sandbox with `browser`/`fetch`/`btoa` stubbed out — top-level
 `function` declarations become sandbox properties, but `const`/`let` (`DEFAULT_SETTINGS`,
 `REQUEST_TIMEOUT_MS`) need an extra script run in the same context to expose them, since they
-live in the global lexical environment rather than as globalThis properties. When adding a new
-setting or a new pure helper, add a matching test rather than only exercising it manually.
+live in the global lexical environment rather than as globalThis properties. `addon/tests/_loadContent.js` does the same for `content.js` by rewriting its IIFE to return its
+pure helpers (`shouldSync`, `mergeCues`, `findActiveCue`, ...); it throws if the file's shape changes.
+When adding a new setting or a new pure helper, add a matching test rather than only exercising
+it manually.
 
 Load the extension for manual testing via `about:debugging#/runtime/this-firefox` > Load Temporary
 Add-on > `addon/manifest.json`. The content script can also be exercised outside Firefox by
