@@ -70,6 +70,49 @@
     </section>
 
     <details>
+      <summary>Subtitle style</summary>
+      <div class="drawer">
+        <label class="row range">
+          <span class="lead">Height above the bottom</span>
+          <output id="subPositionOut"></output>
+          <input type="range" id="subPosition" min="2" max="40" step="1">
+        </label>
+        <label class="row field">
+          <span class="lead">Font</span>
+          <select id="subFont">
+            <option value="default">Gothic</option>
+            <option value="gothic-bold">Gothic bold</option>
+            <option value="rounded">Rounded</option>
+            <option value="mincho">Mincho</option>
+          </select>
+        </label>
+        <label class="row swatch">
+          <span class="lead">Text colour</span>
+          <input type="color" id="subTextColor">
+        </label>
+        <label class="row range">
+          <span class="lead">Background</span>
+          <output id="subBackgroundOpacityOut"></output>
+          <!-- step 4, not 5: it keeps the 72% default and 100% exactly on the grid, so loading the
+               popup never snaps the stored value to a neighbour. -->
+          <input type="range" id="subBackgroundOpacity" min="0" max="100" step="4">
+        </label>
+        <label class="row check">
+          <input type="checkbox" id="subOutline">
+          <span>Outline the text</span>
+        </label>
+        <label class="row field">
+          <span class="lead">Transcript panel side</span>
+          <select id="transcriptSide">
+            <option value="right">Right</option>
+            <option value="left">Left</option>
+          </select>
+        </label>
+        <button type="button" id="reset-style" class="linkbtn">Reset style</button>
+      </div>
+    </details>
+
+    <details>
       <summary>Anki, clips and server</summary>
       <div class="drawer">
         <label class="row field">

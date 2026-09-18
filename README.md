@@ -185,6 +185,13 @@ uses port 8790 precisely so that AnkiConnect can keep its default 8765.
 | Hide YouTube's own captions | Avoids two subtitle layers |
 | Show progress messages | The status badge; errors are always shown |
 | Font size, keep subtitle after speech ends | Presentation; the linger time keeps short lines readable |
+| Height above the bottom | Where the subtitle box sits, 2-40% of the player height; it still drops when YouTube's controls fade out |
+| Font | Gothic (the default stack), Gothic bold, Rounded or Mincho, for the subtitle and the transcript |
+| Text colour | Colour of the subtitle text |
+| Background | Opacity of the black box behind the text, 0-100% |
+| Outline the text | Black outline instead of the box; readable over bright video with the background turned down |
+| Transcript panel side | Docks the panel right or left; the subtitle moves out of its way |
+| Reset style | Restores the six settings above and nothing else |
 | Attach automatically when Yomitan adds a card | Watches AnkiConnect and fills the new card by itself; off means Alt+Shift+M or the pickaxe |
 | Send screenshot and audio to | Anki (newest card) or Downloads |
 | AnkiConnect URL, image/audio/sentence field | AnkiConnect connection and note fields |

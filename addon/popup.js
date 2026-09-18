@@ -13,6 +13,8 @@ let saveTimer = null;
 function readField(el) {
   if (el.type === "checkbox") return el.checked;
   if (el.type === "range" || el.type === "number") return Number(el.value);
+  // A colour well always reports a normalised "#rrggbb"; trimming it would be harmless but a lie.
+  if (el.type === "color") return el.value;
   return el.value.trim();
 }
 
@@ -30,8 +32,13 @@ function readForm() {
 const RANGES = {
   fontScale: (v) => `${Math.round(v * 100)}%`,
   lingerSeconds: (v) => `${v.toFixed(1)} s`,
+  subPosition: (v) => `${v}%`,
+  subBackgroundOpacity: (v) => `${v}%`,
   clipPaddingMs: (v) => `${v} ms`,
 };
+
+// "Reset style" restores these and nothing else, so a botched experiment costs one click.
+const STYLE_KEYS = ["subPosition", "subFont", "subTextColor", "subBackgroundOpacity", "subOutline", "transcriptSide"];
 
 function updateOutputs() {
   for (const [id, format] of Object.entries(RANGES)) {
@@ -41,6 +48,24 @@ function updateOutputs() {
     el.style.setProperty("--fill", `${((value - min) / (Number(el.max) - min)) * 100}%`);
     document.getElementById(`${id}Out`).textContent = format(value);
   }
+}
+
+function setField(el, value) {
+  if (el.type === "checkbox") el.checked = !!value;
+  else el.value = value === undefined || value === null ? "" : value;
+}
+
+async function resetStyle() {
+  const patch = {};
+  for (const key of STYLE_KEYS) {
+    patch[key] = SHISUKO_DEFAULT_SETTINGS[key];
+    const el = document.getElementById(key);
+    if (el) setField(el, patch[key]);
+  }
+  updateOutputs();
+  // A pending edit would otherwise land after the reset and put the old value back.
+  clearTimeout(saveTimer);
+  await browser.runtime.sendMessage({ type: "saveSettings", settings: patch });
 }
 
 function onChange(ev) {
@@ -108,11 +133,10 @@ async function init() {
   const settings = await browser.runtime.sendMessage({ type: "getSettings" });
   for (const key of FIELDS) {
     const el = document.getElementById(key);
-    if (!el) continue;
-    if (el.type === "checkbox") el.checked = !!settings[key];
-    else el.value = settings[key] === undefined || settings[key] === null ? "" : settings[key];
+    if (el) setField(el, settings[key]);
   }
   updateOutputs();
+  document.getElementById("reset-style").addEventListener("click", resetStyle);
   for (const key of FIELDS) {
     const el = document.getElementById(key);
     if (!el) continue;

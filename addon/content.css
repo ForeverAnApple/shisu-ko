@@ -12,25 +12,33 @@
   display: none !important;
 }
 
-/* Subtitle */
+/* Subtitle.
+   The --shisuko-* custom properties are set on .shisuko-root by applySettings() in content.js;
+   the fallbacks here are the defaults, so the overlay looks right before any of them is set. */
 .shisuko-subwrap {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: 11%;
+  bottom: var(--shisuko-sub-bottom, 11%);
   display: flex;
   justify-content: center;
   padding: 0 4%;
   transition: bottom 0.2s ease;
 }
 
+/* YouTube's controls have faded out, so the subtitle can sit lower. */
 .html5-video-player.ytp-autohide .shisuko-subwrap {
-  bottom: 4%;
+  bottom: var(--shisuko-sub-bottom-autohide, 4%);
 }
 
 /* Keep the subtitle clear of the transcript panel while it is open. */
 .shisuko-root.shisuko-has-transcript .shisuko-subwrap {
   right: calc(min(34%, 380px) + 16px);
+}
+
+.shisuko-root.shisuko-has-transcript.shisuko-transcript-left .shisuko-subwrap {
+  right: 0;
+  left: calc(min(34%, 380px) + 16px);
 }
 
 .shisuko-sub {
@@ -40,13 +48,15 @@
   -moz-user-select: text !important;
   cursor: default;
   max-width: 92%;
-  background: rgba(0, 0, 0, 0.72);
-  color: #fff;
+  background: var(--shisuko-sub-bg, rgba(0, 0, 0, 0.72));
+  color: var(--shisuko-sub-color, #fff);
+  font-family: var(--shisuko-sub-font, "Noto Sans JP", "Noto Sans CJK JP", "Yu Gothic UI", "Yu Gothic", "Meiryo", "Hiragino Sans", sans-serif);
+  font-weight: var(--shisuko-sub-weight, 400);
   padding: 0.22em 0.6em 0.28em;
   border-radius: 0.3em;
   line-height: 1.35;
   text-align: center;
-  text-shadow: 0 0 3px rgba(0, 0, 0, 0.9);
+  text-shadow: var(--shisuko-sub-shadow, 0 0 3px rgba(0, 0, 0, 0.9));
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   letter-spacing: 0.01em;
@@ -54,7 +64,7 @@
 }
 
 .shisuko-sub:hover {
-  background: rgba(0, 0, 0, 0.9);
+  background: var(--shisuko-sub-bg-hover, rgba(0, 0, 0, 0.9));
 }
 
 .shisuko-subtext {
@@ -174,11 +184,18 @@
   pointer-events: auto;
   background: rgba(0, 0, 0, 0.8);
   color: #eee;
+  font-family: var(--shisuko-sub-font, "Noto Sans JP", "Noto Sans CJK JP", "Yu Gothic UI", "Yu Gothic", "Meiryo", "Hiragino Sans", sans-serif);
+  font-weight: var(--shisuko-sub-weight, 400);
   border-radius: 6px;
   display: flex;
   flex-direction: column;
   font-size: 14px;
   overflow: hidden;
+}
+
+.shisuko-root.shisuko-transcript-left .shisuko-transcript {
+  right: auto;
+  left: 8px;
 }
 
 .shisuko-transcript-header {

@@ -37,6 +37,24 @@
   // A blank shorter than this reads as a flicker rather than a pause, so the text is held instead.
   const MIN_BLANK_S = 0.3;
 
+  // ---- subtitle style ----
+  const GOTHIC_STACK = '"Noto Sans JP", "Noto Sans CJK JP", "Yu Gothic UI", "Yu Gothic", "Meiryo", "Hiragino Sans", sans-serif';
+  const SUB_FONTS = {
+    default: GOTHIC_STACK,
+    "gothic-bold": GOTHIC_STACK,
+    rounded: '"M PLUS Rounded 1c", "Hiragino Maru Gothic ProN", "Hiragino Maru Gothic Pro", "Yu Gothic UI", "Yu Gothic", sans-serif',
+    mincho: '"Noto Serif JP", "Noto Serif CJK JP", "Hiragino Mincho ProN", "Hiragino Mincho Pro", "Yu Mincho", "YuMincho", serif',
+  };
+  const TRANSCRIPT_SIDES = ["right", "left"];
+  const SUB_POSITION_MIN = 2;
+  const SUB_POSITION_MAX = 40;
+  // How far the box drops once YouTube's controls fade out: 11% - 4% at the default position.
+  const AUTOHIDE_DROP = 7;
+  const HOVER_ALPHA_STEP = 0.18; // 0.72 -> 0.90, the hover shade the overlay always had
+  const PLAIN_SHADOW = "0 0 3px rgba(0, 0, 0, 0.9)";
+  // Four 1px offsets carve the letter out of the video; the blur softens the corners they leave.
+  const OUTLINE_SHADOW = "1px 1px 0 #000, -1px 1px 0 #000, 1px -1px 0 #000, -1px -1px 0 #000, 0 0 2px #000";
+
   const state = {
     settings: Object.assign({}, DEFAULT_SETTINGS),
     videoId: null,
@@ -186,6 +204,40 @@
     applySettings();
   });
 
+  // Settings come from storage, so every value is treated as untrusted input before it reaches CSS.
+  function clampNumber(value, min, max, fallback) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.min(max, Math.max(min, n));
+  }
+
+  function oneOf(value, allowed, fallback) {
+    return allowed.includes(value) ? value : fallback;
+  }
+
+  function hexColor(value, fallback) {
+    return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value) ? value : fallback;
+  }
+
+  // Turn the six style settings into custom properties that content.css reads. Setting them on
+  // the root keeps the stylesheet the single place that decides where each value lands.
+  function applyStyleSettings(root, s) {
+    const bottom = clampNumber(s.subPosition, SUB_POSITION_MIN, SUB_POSITION_MAX, DEFAULT_SETTINGS.subPosition);
+    const font = oneOf(s.subFont, Object.keys(SUB_FONTS), DEFAULT_SETTINGS.subFont);
+    const alpha = clampNumber(s.subBackgroundOpacity, 0, 100, DEFAULT_SETTINGS.subBackgroundOpacity) / 100;
+    const style = root.style;
+    style.setProperty("--shisuko-sub-bottom", `${bottom}%`);
+    // The controls have faded out, so the box drops by the same amount it does at the default.
+    style.setProperty("--shisuko-sub-bottom-autohide", `${Math.max(SUB_POSITION_MIN, bottom - AUTOHIDE_DROP)}%`);
+    style.setProperty("--shisuko-sub-font", SUB_FONTS[font]);
+    style.setProperty("--shisuko-sub-weight", font === "gothic-bold" ? "700" : "400");
+    style.setProperty("--shisuko-sub-color", hexColor(s.subTextColor, DEFAULT_SETTINGS.subTextColor));
+    style.setProperty("--shisuko-sub-bg", `rgba(0, 0, 0, ${alpha})`);
+    style.setProperty("--shisuko-sub-bg-hover", `rgba(0, 0, 0, ${Math.min(1, alpha + HOVER_ALPHA_STEP)})`);
+    style.setProperty("--shisuko-sub-shadow", s.subOutline ? OUTLINE_SHADOW : PLAIN_SHADOW);
+    root.classList.toggle("shisuko-transcript-left", oneOf(s.transcriptSide, TRANSCRIPT_SIDES, DEFAULT_SETTINGS.transcriptSide) === "left");
+  }
+
   function applySettings() {
     const s = state.settings;
     document.documentElement.classList.toggle("shisuko-hide-native", !!s.hideNativeCaptions);
@@ -193,6 +245,7 @@
       state.root.classList.toggle("shisuko-hidden", !s.enabled);
       state.root.classList.toggle("shisuko-has-transcript", !!s.showTranscript);
       state.transcriptEl.classList.toggle("shisuko-hidden", !s.showTranscript);
+      applyStyleSettings(state.root, s);
       if (s.showTranscript) {
         state.transcriptDirty = true;
         state.transcriptAppendFrom = null;

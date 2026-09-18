@@ -190,6 +190,14 @@ h2 {
   cursor: default;
 }
 
+/* Label on the left, the colour chip on the right: the value is the control. */
+.row.swatch {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 8px;
+  align-items: center;
+}
+
 .lead {
   grid-column: 1;
   align-self: center;
@@ -251,6 +259,33 @@ input[type="checkbox"]:checked::after {
 
 .row.check:hover input[type="checkbox"]:not(:checked) {
   border-color: var(--muted);
+}
+
+/* A plain chip: the browser's own colour well is boxed in a hairline that matches the fields. */
+input[type="color"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 28px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--field);
+  cursor: pointer;
+}
+
+input[type="color"]::-moz-color-swatch {
+  border: none;
+  border-radius: 3px;
+}
+
+input[type="color"]::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+input[type="color"]::-webkit-color-swatch {
+  border: none;
+  border-radius: 3px;
 }
 
 input[type="text"],
@@ -351,6 +386,21 @@ kbd {
 
 .hidden {
   display: none;
+}
+
+/* A text button: it undoes, so it must not compete with anything that acts. */
+.linkbtn {
+  align-self: flex-start;
+  font: inherit;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.linkbtn:hover {
+  text-decoration: underline;
 }
 
 /* Set-once settings, folded away */
