@@ -192,6 +192,64 @@ test("ankiPollAllowed stays quiet with nothing to attach or the feature off", ()
   assert.equal(api.ankiPollAllowed(), false);
 });
 
+// ------------------------------------------------------------------ live streams
+
+// A player element the way Firefox shows it to a content script: the page's API sits behind
+// wrappedJSObject, and the video element restarts its own clock at an arbitrary point.
+function livePlayer(current, isLive = true) {
+  return {
+    removeEventListener: () => {}, // discover() lets go of it once the test's fake page is gone
+    wrappedJSObject: { getVideoData: () => ({ isLive }), getProgressState: () => ({ current }) },
+  };
+}
+
+test("liveClock reads the stream clock from a live player and nothing from a video", () => {
+  const { api } = loadContent();
+  assert.equal(api.liveClock(livePlayer(100490.5)), 100490.5);
+  assert.equal(api.liveClock(livePlayer(100490.5, false)), null);
+  assert.equal(api.liveClock({ wrappedJSObject: {} }), null);
+  assert.equal(api.liveClock(null), null);
+  assert.equal(api.liveClock({ wrappedJSObject: { getVideoData: () => { throw new Error("gone"); }, getProgressState: () => ({}) } }), null);
+});
+
+test("playhead runs on the stream clock for a live stream and on video time otherwise", () => {
+  const { api } = loadContent();
+  api.state.video = { currentTime: 46810.4 };
+  api.state.player = livePlayer(100490.4);
+  api.updateLiveClock();
+  assert.equal(api.state.live, true);
+  assert.equal(api.playhead().toFixed(3), "100490.400");
+  api.state.video.currentTime = 46812.4; // two seconds later, between syncs
+  assert.equal(api.playhead().toFixed(3), "100492.400");
+  api.seekPlayhead(100400.0);
+  assert.equal(api.state.video.currentTime.toFixed(3), "46720.000"); // back on the element's clock
+
+  api.state.player = livePlayer(0, false);
+  api.updateLiveClock();
+  assert.equal(api.state.live, false);
+  assert.equal(api.playhead().toFixed(3), "46720.000");
+});
+
+// ------------------------------------------------------------------ master switch
+
+test("the master switch also silences the arrow keys", () => {
+  const { api } = loadContent();
+  api.mergeCues([{ id: 0, start: 0, end: 2, text: "いち" }, { id: 1, start: 5, end: 7, text: "に" }]);
+  api.state.video = { currentTime: 0, paused: true };
+  const events = () => {
+    let stopped = 0;
+    return { key: "ArrowRight", target: { closest: () => null }, preventDefault: () => { stopped++; }, stopImmediatePropagation: () => { stopped++; }, count: () => stopped };
+  };
+  const on = events();
+  api.onKeyDown(on);
+  assert.equal(on.count(), 2);
+  assert.equal(api.state.video.currentTime.toFixed(2), "4.85");
+  api.state.settings.enabled = false;
+  const off = events();
+  api.onKeyDown(off);
+  assert.equal(off.count(), 0); // YouTube keeps its own 5 s seek
+});
+
 test("sentenceForCue joins the cues of a segment but stops at a long pause", () => {
   const { api } = loadContent();
   const sentenceForCue = api.sentenceForCue;

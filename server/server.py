@@ -10,9 +10,14 @@ faster-whisper, starting at the current playhead and continuing ahead of it in
 windows. Cues are returned incrementally, cached on disk, and the extension renders
 them as ordinary DOM text so dictionary tools such as Yomitan can scan them.
 
+A live stream has no file to download: the server follows its DASH audio segments
+instead, keeping the last minutes decoded in memory, and transcribes just behind the
+live edge. Times are the stream's own media clock, which the extension reads from the
+player, so cues line up whatever latency the viewer is watching at.
+
 Endpoints
   GET  /health -> {ok, version, model, device, compute_type, language}
-  POST /sync   -> {ok, session, status, error, duration, title, covered, cues, next, busy}
+  POST /sync   -> {ok, session, status, error, duration, title, live, covered, cues, next, busy}
   GET  /clip?video_id=..&start=..&end=..&format=mp3|wav -> audio clip of a sentence (mining)
 
 Everything lives under ~/.shisu-ko (override with the SHISUKO_HOME environment variable):
@@ -42,7 +47,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlsplit
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 SAMPLE_RATE = 16000
 APP_DIR = Path(os.environ.get("SHISUKO_HOME") or (Path.home() / ".shisu-ko"))
 CACHE_DIR = APP_DIR / "cache"
@@ -568,6 +573,10 @@ class Session:
     # (offset_seconds, samples): a short decode around the playhead that lets transcription start
     # before the whole track has been decoded. Dropped once `audio` holds everything.
     preview: Optional[tuple] = None
+    # A live stream keeps its audio here instead: the decoded segments around the playhead, on the
+    # stream's media clock (the same one the player reports), without a beginning or an end.
+    live: bool = False
+    live_audio: Optional["LiveAudio"] = None
     cues: list = field(default_factory=list)
     covered: list = field(default_factory=list)
     speech: list = field(default_factory=list)  # merged Silero intervals, absolute seconds
@@ -591,8 +600,50 @@ class Session:
         )
 
 
+class LiveAudio:
+    """Decoded 16 kHz audio of a live stream: one chunk per fetched segment, on the stream's clock.
+
+    Chunks are kept sorted by start; segments arrive in order from the follower but a seek can add
+    earlier ones. Everything older than the playhead's neighbourhood is trimmed away by the caller.
+    """
+
+    def __init__(self):
+        self.chunks: list = []  # [start_seconds, float32 samples], sorted by start
+
+    def add(self, start: float, samples: np.ndarray) -> None:
+        if len(samples) == 0 or any(abs(c[0] - start) < 0.01 for c in self.chunks):
+            return
+        self.chunks.append([float(start), samples])
+        self.chunks.sort(key=lambda c: c[0])
+
+    def available(self) -> list:
+        return merge_intervals([[c[0], c[0] + len(c[1]) / SAMPLE_RATE] for c in self.chunks])
+
+    def end(self) -> float:
+        return max((c[0] + len(c[1]) / SAMPLE_RATE for c in self.chunks), default=0.0)
+
+    def trim(self, before: float) -> None:
+        self.chunks = [c for c in self.chunks if c[0] + len(c[1]) / SAMPLE_RATE >= before]
+
+    def slice(self, start: float, end: float) -> Optional[np.ndarray]:
+        """Samples for [start, end), or None unless the whole range has been fetched."""
+        have = find_covering(self.available(), start, tol=0.0)
+        if have is None or end <= start or end > have[1] + 0.01:
+            return None
+        n = int(round((end - start) * SAMPLE_RATE))
+        out = np.zeros(n, dtype=np.float32)
+        for c_start, samples in self.chunks:
+            offset = int(round((c_start - start) * SAMPLE_RATE))
+            a, b = max(0, offset), min(n, offset + len(samples))
+            if b > a:
+                out[a:b] = samples[a - offset: b - offset]
+        return out
+
+
 def audio_slice(s: Session, start: float, end: float) -> Optional[np.ndarray]:
     """Samples for [start, end): from the full decode, or from the preview while that is all there is."""
+    if s.live_audio is not None:
+        return s.live_audio.slice(start, end)
     if s.audio is not None:
         return s.audio[int(start * SAMPLE_RATE): int(end * SAMPLE_RATE)]
     if s.preview is None:
@@ -605,8 +656,51 @@ def audio_slice(s: Session, start: float, end: float) -> Optional[np.ndarray]:
     return samples[a:b]
 
 
+LIVE_MIN_WINDOW = 8.0  # seconds of new audio at the live edge before it is worth a Whisper call
+
+
+def plan_live_window(s: Session, args) -> Optional[tuple]:
+    """plan_window for a live stream: the same rules, inside the audio fetched so far.
+
+    The live edge is not the end of the video: a short window there is left to grow instead of
+    being transcribed as a sliver or marked covered.
+    """
+    if s.status != "ready" or s.live_audio is None:
+        return None
+    avail = s.live_audio.available()
+    if not avail:
+        return None
+    t = max(0.0, s.want_t)
+    cov = find_covering(s.covered, t)
+    if cov is None:
+        start = max(0.0, t - 0.5)
+        size = args.first_window
+    else:
+        start = cov[1]
+        if args.lookahead > 0 and start - t > args.lookahead:
+            return None
+        size = args.window
+    have = find_covering(avail, start, tol=0.0)
+    if have is None:
+        return None  # the follower has not fetched this part (yet)
+    end = min(start + size, have[1])
+    nxt = next_start_after(s.covered, start + 0.01)
+    if nxt is not None:
+        end = min(end, nxt)
+    at_edge = end >= have[1] - 0.01
+    if end - start < 1.5:
+        if not at_edge:
+            s.covered = merge_intervals(s.covered + [[start, end]])
+        return None
+    if at_edge and end - start < LIVE_MIN_WINDOW:
+        return None
+    return (start, end)
+
+
 def plan_window(s: Session, args) -> Optional[tuple]:
     """Pick the next [start, end) window to transcribe for a session, or None if idle."""
+    if s.live_audio is not None:
+        return plan_live_window(s, args)
     if s.status != "ready" or (s.audio is None and s.preview is None) or s.duration <= 0:
         return None
     t = min(max(0.0, s.want_t), s.duration)
@@ -760,9 +854,19 @@ class Fetcher:
             if path is None:
                 log.info("[%s] downloading audio", s.video_id)
                 path = self.download(s)
+                if path is None:
+                    self.follow_live(s)  # returns when the stream ends or nobody watches any more
+                    return
             else:
                 log.info("[%s] using cached audio %s", s.video_id, path.name)
             with s.lock:
+                if s.live:
+                    # The stream ended and came back as a video: its clock starts over, so the cues
+                    # made on the live clock are dropped, and the new token tells the client to follow.
+                    s.live = False
+                    s.live_audio = None
+                    s.cues, s.covered, s.speech, s.seg_next = [], [], [], 0
+                    s.token = uuid.uuid4().hex[:12]
                 have_preview = s.preview is not None  # the download hook already published one
                 if not have_preview:
                     s.status = "decoding"
@@ -865,20 +969,21 @@ class Fetcher:
         else:
             log.debug("[%s] the partial download did not decode yet; waiting for the full file", s.video_id)
 
-    def download(self, s: Session) -> Path:
+    def download(self, s: Session) -> Optional[Path]:
+        """Download the audio track; None for a live stream, which has no track to download."""
         import yt_dlp
 
         url = f"https://www.youtube.com/watch?v={s.video_id}"
         state = {"fired": False, "abr": 0.0}  # shared with the progress hook below
         with yt_dlp.YoutubeDL(self.ytdlp_options(s.video_id, self.progress_hook(s, state))) as ydl:
             info = ydl.extract_info(url, download=False)
-            if info.get("is_live"):
-                raise RuntimeError("Live streams are not supported yet")
             hint, abr = info.get("duration"), info.get("abr")
             state["abr"] = float(abr) if isinstance(abr, (int, float)) else 0.0
             with s.lock:
                 s.title = info.get("title") or ""
                 s.duration_hint = float(hint) if isinstance(hint, (int, float)) else 0.0
+            if info.get("is_live"):
+                return None
             try:
                 ydl.process_ie_result(info, download=True)
             except Exception as exc:  # noqa: BLE001
@@ -889,6 +994,211 @@ class Fetcher:
         if path is None:
             raise RuntimeError("yt-dlp finished but no audio file was produced")
         return path
+
+    def follow_live(self, s: Session) -> None:
+        log.info("[%s] live stream: following the audio segments%s", s.video_id, f": {s.title}" if s.title else "")
+        source = DashLiveSource(self, s.video_id)
+        source.refresh()
+        LiveFollower(s, source, self.args).run()
+
+
+# --------------------------------------------------------------------------- live streams
+
+# YouTube serves a live stream as numbered DASH segments (…&sq=N), each a self-contained fMP4 whose
+# timestamps are the stream's media clock: the clock the player's getProgressState().current runs
+# on, so no conversion is needed between what the extension reports and what is transcribed.
+LIVE_KEEP_BEHIND = 900.0        # seconds of audio kept behind the playhead, for seeking back and clips
+LIVE_START_BEHIND = 8           # segments behind the live head to start at while the playhead is unknown
+LIVE_HEAD_POLL = 1.0            # seconds between head checks once the follower has caught up
+LIVE_MAX_ERRORS = 12            # consecutive failed segment fetches before the session errors out
+LIVE_PREFERRED_ITAGS = ("140", "141", "139", "251", "250", "249")
+
+
+class LiveEnded(Exception):
+    """The stream is over: yt-dlp no longer reports it as live."""
+
+
+def decode_segment(data: bytes) -> tuple:
+    """(start_seconds, float32 samples at SAMPLE_RATE) of one self-contained DASH segment."""
+    import av
+
+    chunks = []
+    start = None
+    with av.open(io.BytesIO(data)) as container:
+        stream = container.streams.audio[0]
+        resampler = av.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
+        for frame in container.decode(stream):
+            if frame.pts is None:
+                continue
+            if start is None:
+                start = float(frame.pts * stream.time_base)
+            for rf in resampler.resample(frame):
+                chunks.append(rf.to_ndarray()[0])
+        for rf in resampler.resample(None):
+            chunks.append(rf.to_ndarray()[0])
+    if start is None or not chunks:
+        raise RuntimeError("segment holds no audio")
+    return start, np.concatenate(chunks).astype(np.float32) / 32768.0
+
+
+class DashLiveSource:
+    """The segment URLs of a live stream's audio, refreshed through yt-dlp when they expire."""
+
+    def __init__(self, fetcher: "Fetcher", video_id: str):
+        self.fetcher = fetcher
+        self.video_id = video_id
+        self.base_url = ""
+        self.seg_seconds = 5.0
+        self.last_head: Optional[int] = None
+        self.refreshed_at = 0.0
+
+    def refresh(self) -> None:
+        import yt_dlp
+
+        opts = dict(self.fetcher.ytdlp_options(self.video_id), live_from_start=True)
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(f"https://www.youtube.com/watch?v={self.video_id}", download=False)
+        if not info.get("is_live"):
+            raise LiveEnded("The live stream has ended")
+        fmts = [f for f in info.get("formats") or [] if f.get("vcodec") == "none" and f.get("url") and f.get("is_from_start")]
+        fmts.sort(key=lambda f: (LIVE_PREFERRED_ITAGS.index(str(f.get("format_id"))) if str(f.get("format_id")) in LIVE_PREFERRED_ITAGS else 99))
+        if not fmts:
+            raise RuntimeError("This live stream offers no audio segments (DVR may be disabled)")
+        chosen = fmts[0]
+        self.base_url = chosen["url"]
+        seg = chosen.get("target_duration")
+        self.seg_seconds = float(seg) if isinstance(seg, (int, float)) and seg > 0 else 5.0
+        self.refreshed_at = time.time()
+        log.info("[%s] live audio format %s, %.0f s segments", self.video_id, chosen.get("format_id"), self.seg_seconds)
+
+    def _request(self, url: str, method: str = "GET") -> tuple:
+        import urllib.error
+        import urllib.request
+
+        req = urllib.request.Request(url, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as res:
+                head = res.headers.get("X-Head-Seqnum")
+                if head is not None:
+                    self.last_head = int(head)
+                return res.read() if method == "GET" else b"", res.status
+        except urllib.error.HTTPError as exc:
+            if exc.code == 403 and time.time() - self.refreshed_at > 60:
+                self.refresh()  # the URL expired; the caller retries with the new one
+            raise
+
+    def head(self) -> int:
+        self._request(self.base_url, method="HEAD")
+        if self.last_head is None:
+            raise RuntimeError("no X-Head-Seqnum header on the live stream")
+        return self.last_head
+
+    def segment(self, seq: int) -> tuple:
+        data, _ = self._request(f"{self.base_url}&sq={seq}")
+        return decode_segment(data)
+
+
+class LiveFollower:
+    """Keeps a live session's audio buffer filled around the playhead.
+
+    Runs on the fetch thread until the stream ends, the viewer leaves for --idle-minutes, or too
+    many fetches fail in a row. `source` provides head() and segment(seq); tests pass a fake.
+    """
+
+    def __init__(self, s: Session, source, args, sleep=time.sleep, clock=time.time):
+        self.s = s
+        self.source = source
+        self.args = args
+        self.sleep = sleep
+        self.clock = clock
+
+    def run(self) -> None:
+        s = self.s
+        buf = LiveAudio()
+        with s.lock:
+            s.live = True
+            s.live_audio = buf
+            s.audio = None
+            s.preview = None
+            s.status = "downloading"
+        cursor: Optional[int] = None
+        head: Optional[int] = None
+        head_at = 0.0
+        errors = 0
+        idle_limit = float(getattr(self.args, "idle_minutes", 30)) * 60.0
+        client_timeout = float(getattr(self.args, "client_timeout", 30.0))
+        lookahead = float(getattr(self.args, "lookahead", 0.0))
+        try:
+            while True:
+                with s.lock:
+                    want = s.want_t
+                    idle = self.clock() - s.last_sync
+                    avail = buf.available()
+                if idle > idle_limit:
+                    with s.lock:
+                        s.status = "evicted"
+                        s.live_audio = None
+                    log.info("[%s] released the live audio after %d idle minutes", s.video_id, int(idle_limit // 60))
+                    return
+                if client_timeout > 0 and idle > client_timeout:
+                    self.sleep(1.0)  # nobody is watching: leave the segments where they are
+                    continue
+                dur = self.source.seg_seconds
+                if head is None or (cursor is not None and cursor > head and self.clock() - head_at >= LIVE_HEAD_POLL):
+                    head = self.source.head()
+                    head_at = self.clock()
+                cursor = self.place_cursor(cursor, want, avail, head, dur)
+                if cursor > head:
+                    self.sleep(0.5)
+                    continue
+                if lookahead > 0 and cursor * dur > want + lookahead and want > 0:
+                    self.sleep(1.0)
+                    continue
+                try:
+                    start, samples = self.source.segment(cursor)
+                except LiveEnded:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors += 1
+                    log.warning("[%s] live segment %d failed (%s)", s.video_id, cursor, exc)
+                    if errors >= LIVE_MAX_ERRORS:
+                        self.source.refresh()  # raises LiveEnded once the stream is over
+                        raise RuntimeError("The live stream's audio could not be fetched") from exc
+                    self.sleep(min(5.0, 1.0 * errors))
+                    continue
+                errors = 0
+                head = max(head, self.source.last_head or head)
+                with s.lock:
+                    buf.add(start, samples)
+                    buf.trim(max(want, start) - LIVE_KEEP_BEHIND)
+                    s.duration = buf.end()
+                    if s.status == "downloading":
+                        s.status = "ready"
+                        log.info("[%s] live audio from %s, %d s behind the head", s.video_id, fmt_time(start), int((head - cursor) * dur))
+                cursor += 1
+        except LiveEnded as exc:
+            with s.lock:
+                s.status = "error"
+                s.error = str(exc)
+                s.error_at = self.clock()
+                s.live_audio = None
+            log.info("[%s] %s", s.video_id, exc)
+
+    @staticmethod
+    def place_cursor(cursor: Optional[int], want: float, avail: list, head: int, dur: float) -> int:
+        """The next segment to fetch: the current run, or a fresh start near the playhead after a seek.
+
+        Segment N holds roughly [N*dur, (N+1)*dur) of the clock, but the exact offset differs from
+        stream to stream, so a fresh start begins two segments early to be sure to reach the playhead.
+        """
+        if want <= 0:
+            return cursor if cursor is not None else max(0, head - LIVE_START_BEHIND)
+        if cursor is not None:
+            near = find_covering(avail, want, tol=2 * dur) is not None
+            heading_there = (cursor - 2) * dur <= want <= (cursor + 2) * dur
+            if near or heading_there:
+                return cursor
+        return max(0, int(want // dur) - 2)
 
 
 # --------------------------------------------------------------------------- audio clips (sentence mining)
@@ -985,10 +1295,20 @@ def make_clip(video_id: str, start: float, end: float, fmt: str, fallback_audio:
             log.warning("[%s] clip decode from the source file failed (%s); using the 16 kHz copy", video_id, exc)
     if samples is None and fallback_audio is not None:
         a, b = int(start * SAMPLE_RATE), int(end * SAMPLE_RATE)
-        samples = np.clip(fallback_audio[a:b] * 32767.0, -32768, 32767).astype(np.int16)
-        rate = SAMPLE_RATE
+        return encode_clip(fallback_audio[a:b], fmt)
     if samples is None or len(samples) == 0:
         raise RuntimeError("no audio available for this range")
+    return _encode_clip(samples, rate, fmt)
+
+
+def encode_clip(samples: np.ndarray, fmt: str):
+    """Clip bytes from float32 samples at SAMPLE_RATE (the decoded copy, or a live stream's buffer)."""
+    if len(samples) == 0:
+        raise RuntimeError("no audio available for this range")
+    return _encode_clip(np.clip(samples * 32767.0, -32768, 32767).astype(np.int16), SAMPLE_RATE, fmt)
+
+
+def _encode_clip(samples: np.ndarray, rate: int, fmt: str):
     if fmt == "mp3":
         try:
             return _mp3_bytes(samples, rate), "audio/mpeg", "mp3"
@@ -1023,7 +1343,8 @@ class Transcriber(threading.Thread):
             if audio is None:
                 return
             s.busy = [round(start, 2), round(end, 2)]
-            boundary_free = end < s.duration - 0.05 and find_covering(s.covered, end + 0.01, tol=0.0) is None
+            # More audio always follows the live edge, so a segment cut there is re-transcribed too.
+            boundary_free = (s.live or end < s.duration - 0.05) and find_covering(s.covered, end + 0.01, tol=0.0) is None
 
         t0 = time.time()
         try:
@@ -1132,7 +1453,8 @@ class App:
                 out.append({
                     "video_id": s.video_id, "status": s.status, "title": s.title, "duration": s.duration,
                     "cues": len(s.cues), "covered": s.covered, "want_t": s.want_t, "busy": s.busy,
-                    "preview": s.preview is not None,
+                    "preview": s.preview is not None, "live": s.live,
+                    "live_audio": s.live_audio.available() if s.live_audio is not None else None,
                     "idle_seconds": round(time.time() - s.last_sync, 1),
                 })
         return {"ok": True, "sessions": out}
@@ -1168,6 +1490,7 @@ class App:
                 "error": s.error,
                 "duration": s.duration,
                 "title": s.title,
+                "live": s.live,
                 "covered": [[round(a, 2), round(b, 2)] for a, b in s.covered],
                 # Only the intervals around the playhead: the whole list would be resent every second.
                 "speech": [[round(a, 2), round(b, 2)] for a, b in s.speech
@@ -1190,6 +1513,14 @@ class App:
         fallback = None
         if s is not None:
             with s.lock:
+                if s.live_audio is not None:
+                    # The buffer holds a few minutes around the playhead; a clip outside it is gone for good.
+                    samples = s.live_audio.slice(max(0.0, start), end)
+                    if samples is None:
+                        raise ValueError("this part of the live stream is no longer buffered")
+                    return encode_clip(samples, fmt)
+                if s.live:
+                    raise ClipNotReady()
                 fallback = s.audio
                 if s.duration:
                     end = min(end, s.duration)
@@ -1227,11 +1558,16 @@ class App:
             sessions = list(self.sessions.values())
         for s in sessions:
             with s.lock:
-                if s.status == "ready" and s.audio is not None and now - s.last_sync > self.args.idle_minutes * 60:
+                if now - s.last_sync <= self.args.idle_minutes * 60:
+                    continue
+                if s.status == "ready" and s.audio is not None:
                     s.audio = None
                     s.preview = None
                     s.status = "evicted"
                     log.info("[%s] released audio after %d idle minutes", s.video_id, self.args.idle_minutes)
+                elif s.live_audio is not None and not s.fetching:
+                    s.live_audio = None  # a follower that stopped on an error leaves its buffer behind
+                    s.status = "evicted"
 
     def load_cache(self, s: Session) -> None:
         path = s.cache_path()
@@ -1260,6 +1596,8 @@ class App:
 
     def save_cache(self, s: Session) -> None:
         with s.lock:
+            if s.live:
+                return  # the stream's clock is not the clock of the video it becomes afterwards
             data = {
                 "video_id": s.video_id, "title": s.title, "duration": s.duration,
                 "format": CACHE_FORMAT,

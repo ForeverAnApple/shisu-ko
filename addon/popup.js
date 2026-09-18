@@ -48,6 +48,9 @@ function updateOutputs() {
     el.style.setProperty("--fill", `${((value - min) / (Number(el.max) - min)) * 100}%`);
     document.getElementById(`${id}Out`).textContent = format(value);
   }
+  const on = document.getElementById("enabled").checked;
+  document.getElementById("enabled-label").textContent = on ? "On" : "Off";
+  document.body.classList.toggle("off", !on);
 }
 
 function setField(el, value) {

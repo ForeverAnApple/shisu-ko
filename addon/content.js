@@ -117,6 +117,10 @@
     pausedSince: 0, // when the video was last paused, 0 while it plays
     lastHref: null,
     rediscover: true, // re-query the player and video on the next discover() tick
+    // A live stream's cues sit on the stream's media clock, which the player exposes as
+    // getProgressState().current; video.currentTime restarts from an arbitrary point on every load.
+    live: false,
+    liveOffset: 0, // media clock minus video.currentTime, refreshed on every sync
   };
 
   // ------------------------------------------------------------ helpers
@@ -207,6 +211,39 @@
     return state.cueById.get(Number(id)) || null;
   }
 
+  // ------------------------------------------------------------ playhead clock
+
+  // The stream clock of a live player, or null for an ordinary video. Firefox lets a content
+  // script call the page's player API through wrappedJSObject; only numbers are taken from it.
+  function liveClock(player) {
+    try {
+      const api = player && player.wrappedJSObject;
+      if (!api || typeof api.getVideoData !== "function" || typeof api.getProgressState !== "function") return null;
+      const data = api.getVideoData();
+      if (!data || !data.isLive) return null;
+      const current = Number(api.getProgressState().current);
+      return Number.isFinite(current) ? current : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function updateLiveClock() {
+    const current = state.video ? liveClock(state.player) : null;
+    state.live = current !== null;
+    state.liveOffset = state.live ? current - (Number(state.video.currentTime) || 0) : 0;
+  }
+
+  // Where the viewer is, on the clock the cues use. Pure given state.
+  function playhead() {
+    const t = state.video ? Number(state.video.currentTime) || 0 : 0;
+    return state.live ? t + state.liveOffset : t;
+  }
+
+  function seekPlayhead(t) {
+    state.video.currentTime = Math.max(0, t - (state.live ? state.liveOffset : 0));
+  }
+
   // ------------------------------------------------------------ settings
 
   async function loadSettings() {
@@ -263,7 +300,7 @@
 
   function applySettings() {
     const s = state.settings;
-    document.documentElement.classList.toggle("shisuko-hide-native", !!s.hideNativeCaptions);
+    document.documentElement.classList.toggle("shisuko-hide-native", !!s.enabled && !!s.hideNativeCaptions);
     if (state.root) {
       state.root.classList.toggle("shisuko-hidden", !s.enabled);
       state.root.classList.toggle("shisuko-has-transcript", !!s.showTranscript);
@@ -478,6 +515,8 @@
     state.hoverFrame = null;
     state.lastSyncAt = 0;
     state.pausedSince = state.video && state.video.paused ? Date.now() : 0;
+    state.live = false;
+    state.liveOffset = 0;
     clearHoverCapture();
     clearResumeTimer();
     setSubtitle(null);
@@ -520,7 +559,7 @@
     pollForNewCard();
     const decision = {
       paused: !!video.paused,
-      t: Number(video.currentTime) || 0,
+      t: playhead(),
       status: state.serverStatus,
       covered: state.covered,
       duration: state.duration,
@@ -534,6 +573,7 @@
     if (!s.enabled || !state.videoId || !state.video || state.syncInFlight) return;
     if (isAdPlaying()) return;
     const videoId = state.videoId;
+    updateLiveClock();
     state.syncInFlight = true;
     state.lastSyncAt = Date.now();
     let result;
@@ -544,7 +584,7 @@
         body: {
           video_id: videoId,
           url: location.href,
-          t: Number(state.video.currentTime) || 0,
+          t: playhead(),
           paused: !!state.video.paused,
           since: state.since,
         },
@@ -695,7 +735,7 @@
   }
 
   function onKeyDown(ev) {
-    if (!state.settings.arrowKeysJumpCues) return;
+    if (!state.settings.enabled || !state.settings.arrowKeysJumpCues) return;
     if (ev.ctrlKey || ev.altKey || ev.metaKey || ev.shiftKey) return;
     const direction = ev.key === "ArrowLeft" ? -1 : ev.key === "ArrowRight" ? 1 : 0;
     if (!direction) return;
@@ -704,7 +744,7 @@
     // Typing in the search box or a comment: the arrows belong to the caret.
     const el = ev.target;
     if (el && typeof el.closest === "function" && el.closest(KEY_SKIP_SELECTOR)) return;
-    const to = jumpTarget(state.cues, Number(video.currentTime) || 0, direction);
+    const to = jumpTarget(state.cues, playhead(), direction);
     if (to === null) return; // no cue ahead: leave YouTube's five second seek alone
     // YouTube listens on the player while the event bubbles, so the capture phase is not enough
     // on its own; killing the rest of the dispatch here is what keeps the 5 s seek from firing.
@@ -715,7 +755,7 @@
     state.hoverPaused = false;
     state.awaitingPlayerMove = false;
     clearResumeTimer();
-    video.currentTime = to;
+    seekPlayhead(to);
     if (playing) video.play().catch(() => {});
   }
 
@@ -727,7 +767,7 @@
       return;
     }
     if (state.hoverPaused) return;
-    setSubtitle(findActiveCue(Number(video.currentTime) || 0));
+    setSubtitle(findActiveCue(playhead()));
   }
 
   function setSubtitle(cue) {
@@ -788,7 +828,7 @@
             isError = true;
             break;
           case "ready": {
-            const t = state.video ? Number(state.video.currentTime) || 0 : 0;
+            const t = playhead();
             const ahead = coveredUntil(t);
             if (ahead === null) text = "Transcribing…";
             else if (ahead - t < 8 && ahead < state.duration - 1) text = `Transcribing… (ready to ${formatTime(ahead)})`;
@@ -911,7 +951,7 @@
     const line = time.closest(".shisuko-line");
     const start = Number(line && line.dataset.start);
     if (!Number.isFinite(start)) return;
-    state.video.currentTime = Math.max(0, start - 0.2);
+    seekPlayhead(start - 0.2);
     state.video.play().catch(() => {});
   }
 
@@ -922,7 +962,7 @@
       const active = cueById(state.activeCueId);
       if (active) return active;
     }
-    const t = state.video ? Number(state.video.currentTime) || 0 : 0;
+    const t = playhead();
     let best = null;
     for (const c of state.cues) {
       if (c.start <= t + 0.5 && c.end >= t - MINE_RECENT_WINDOW_S && (!best || c.start > best.start)) best = c;
@@ -1051,7 +1091,7 @@
       if (opts.seekForFrame) {
         restore = { t: video.currentTime, paused: video.paused };
         video.pause();
-        await seekTo(video, Math.min(cue.end, cue.start + 0.4));
+        await seekTo(video, Math.min(cue.end, cue.start + 0.4) - (state.live ? state.liveOffset : 0));
       }
       const hover = state.hoverFrame;
       const useHover = opts.auto && hover && hover.cueId === cue.id && Date.now() - hover.at < HOVER_FRAME_MAX_AGE_MS;

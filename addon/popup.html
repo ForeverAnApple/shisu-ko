@@ -8,6 +8,13 @@
   <header>
     <img src="icons/icon.svg" alt="" width="28" height="28">
     <h1>Shisu-ko</h1>
+    <!-- The master switch: off means no subtitles, no server requests, no key handling, no Anki
+         watching, nothing on the page. Alt+Shift+S flips it too. -->
+    <label class="switch" title="Turn Shisu-ko on or off (Alt+Shift+S)">
+      <input type="checkbox" id="enabled">
+      <span class="track"></span>
+      <span id="enabled-label" class="switch-label">On</span>
+    </label>
     <div class="statusline">
       <span id="server-status" class="badge">Checking server</span>
       <span id="server-detail" class="detail"></span>
@@ -22,11 +29,6 @@
 
     <section>
       <h2>Subtitles</h2>
-      <label class="row check">
-        <input type="checkbox" id="enabled">
-        <span>Show subtitles</span>
-        <kbd>Alt+Shift+S</kbd>
-      </label>
       <label class="row check">
         <input type="checkbox" id="pauseOnHover">
         <span>Pause video while hovering a line</span>

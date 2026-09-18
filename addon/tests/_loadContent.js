@@ -17,7 +17,7 @@ const OPEN = "(() => {";
 const CLOSE = "})();";
 const EXPORTS =
   "  return { state, shouldSync, coveredEnd, findActiveCue, jumpTarget, sentenceForCue," +
-  " getVideoIdFromUrl, mergeCues, cueById, ankiPollAllowed, currentCueForMining };\n";
+  " getVideoIdFromUrl, mergeCues, cueById, ankiPollAllowed, currentCueForMining, liveClock, updateLiveClock, playhead, seekPlayhead, onKeyDown };\n";
 
 function instrument(source) {
   const open = source.indexOf(OPEN);

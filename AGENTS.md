@@ -35,6 +35,13 @@ sign-addon.cmd   signs the extension through addons.mozilla.org (needs the owner
   localhost, validates `video_id` against `^[A-Za-z0-9_-]{6,20}$`, and answers browser requests
   only from the extension's own origin or from pages on loopback hosts (`origin_allowed()`), so
   arbitrary websites cannot drive downloads and transcription.
+- `enabled` in the settings is the master switch (the header toggle in the popup, Alt+Shift+S).
+  Off must mean nothing happens on YouTube pages: no `/sync`, no overlay, no native-caption
+  hiding, no arrow-key handling, no Anki polling. Only the toggle command itself keeps working.
+- Live streams run on the stream's media clock, `getProgressState().current` of YouTube's player
+  (read through `wrappedJSObject`, Firefox only), never on `video.currentTime`, which restarts at
+  an arbitrary point on every page load. Every place the content script reads or seeks the
+  playhead goes through `playhead()` / `seekPlayhead()`.
 - Runtime data lives in `~/.shisu-ko` (`SHISUKO_HOME` overrides it): `venv/`, `models/`, `cache/`.
   Cue caches are `cache/<video_id>.cues.json` and are only reused when model and language match.
 - No absolute personal paths, no secrets and no `.env` in tracked files. `.env` is machine-specific
@@ -67,6 +74,26 @@ ready; `plan_window()` then only plans inside the preview and `audio_slice()` se
 playhead is within the first minute, a yt-dlp progress hook already runs that preview on the growing
 `.part` file once enough bytes are in, so the first cues arrive while the download continues. The
 full decode replaces it with `Session.audio` and clears the preview.
+
+## How live streams work
+
+yt-dlp reports `is_live`; `Fetcher.download()` then returns None and `Fetcher.follow_live()` runs
+`LiveFollower` on the fetch thread instead of downloading. `DashLiveSource` asks yt-dlp (with
+`live_from_start`) for the audio format's base URL and fetches `…&sq=N` segments: self-contained
+fMP4 whose timestamps are the stream's media clock, verified to be the same clock as the player's
+`getProgressState().current` (a DASH segment cross-correlates at 1.0 with the HLS audio at the
+`PROGRAM-DATE-TIME` position, and the player's `ingestionTime` matches within ~0.2 s). The live
+head comes from the `X-Head-Seqnum` response header; an expired URL (403) is refreshed once a
+minute at most. The follower starts one segment before the playhead (`place_cursor()`), runs
+forward to the head, waits for new segments, jumps after a seek, pauses while no client has
+synced for `--client-timeout`, and exits after `--idle-minutes` (status `evicted`, refetched on
+the next sync). Decoded audio lives in `Session.live_audio` (`LiveAudio`, 16 kHz chunks on the
+stream clock, trimmed to `LIVE_KEEP_BEHIND` seconds behind the playhead); `audio_slice()`,
+`plan_window()` (`plan_live_window()`: a window at the live edge waits until `LIVE_MIN_WINDOW`
+seconds are there instead of being marked covered) and `/clip` read it. Live sessions are never
+written to the cue cache; when the stream ends and comes back as a video, `Fetcher.fetch()` drops
+the live cues and changes the session token so the client starts over on the video's clock.
+`server/tests/test_live.py` drives the follower with a fake source and clock.
 
 ## How automatic mining works
 
@@ -158,6 +185,9 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
 - Regular Firefox only keeps signed add-ons; unsigned builds are temporary installs only.
 - Screenshots fail on DRM-protected videos (tainted canvas); the audio clip still works.
 - The native server and the container both use port 8790; run one at a time.
+- `browser.downloads.download()` refuses `data:` URLs ("Access denied for URL data:...", thrown
+  synchronously before any promise exists): an extension may not load a URL that inherits its
+  principal. Build a `Blob`, pass `URL.createObjectURL()` from the background page, revoke it later.
 
 ## Making changes
 
