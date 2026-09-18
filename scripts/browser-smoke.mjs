@@ -47,9 +47,13 @@ async function poll(read, expected, timeout = 5000) {
   throw new Error(`Timed out waiting for browser state (last value: ${JSON.stringify(value)})`);
 }
 let syncCount = 0;
+let healthCount = 0;
 const api = await listen(async (req, res) => {
   const url = new URL(req.url, "http://127.0.0.1");
-  if (url.pathname === "/health") return json(res, { model: "smoke", device: "cpu", compute_type: "test" });
+  if (url.pathname === "/health") {
+    healthCount++;
+    return json(res, { model: "smoke", device: "cpu", compute_type: "test" });
+  }
   if (url.pathname === "/sync") {
     syncCount++;
     return json(res, {
@@ -116,6 +120,7 @@ try {
   await popup.locator("#showTranscript").check();
   await popup.waitForTimeout(600);
   await poll(() => popup.locator("#server-status").textContent(), (value) => value === "Server online");
+  assert.ok(healthCount > 0, "popup health check must reach the fixture server");
   await popup.close();
 
   const page = await context.newPage();

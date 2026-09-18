@@ -9,6 +9,7 @@ const FIELDS = Object.keys(SHISUKO_DEFAULT_SETTINGS);
 const YOUTUBE_ORIGINS = ["*://www.youtube.com/*", "*://m.youtube.com/*", "*://youtube.com/*"];
 
 let saveTimer = null;
+let serverCheckPending = false;
 
 function readField(el) {
   if (el.type === "checkbox") return el.checked;
@@ -68,15 +69,19 @@ async function resetStyle() {
   updateOutputs();
   // A pending edit would otherwise land after the reset and put the old value back.
   clearTimeout(saveTimer);
+  serverCheckPending = false;
   await browser.runtime.sendMessage({ type: "saveSettings", settings: patch });
 }
 
 function onChange(ev) {
   updateOutputs();
+  if (ev.target.id === "serverUrl") serverCheckPending = true;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
+    const shouldCheckServer = serverCheckPending;
+    serverCheckPending = false;
     await browser.runtime.sendMessage({ type: "saveSettings", settings: readForm() });
-    if (ev.target.id === "serverUrl") checkServer();
+    if (shouldCheckServer) checkServer();
   }, 150);
 }
 
