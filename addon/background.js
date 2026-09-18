@@ -341,6 +341,13 @@ function base64ToBlob(base64, mime) {
 const OBJECT_URL_TTL_MS = 120000;
 
 async function downloadBlob(blob, filename) {
+  // MV3 service workers do not expose URL.createObjectURL. Chrome accepts a
+  // data URL for downloads, while Firefox requires the extension-owned object
+  // URL below (Firefox rejects data URLs in downloads.download).
+  if (/^chrome-extension:/.test(browser.runtime.getURL(""))) {
+    const url = `data:${blob.type || "application/octet-stream"};base64,${bytesToBase64(await blob.arrayBuffer())}`;
+    return browser.downloads.download({ url, filename, conflictAction: "uniquify", saveAs: false });
+  }
   const url = URL.createObjectURL(blob);
   let release = () => {
     release = () => {};

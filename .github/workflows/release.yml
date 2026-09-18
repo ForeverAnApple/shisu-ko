@@ -1,0 +1,37 @@
+name: Release extensions
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r server/requirements-test.txt
+      - run: python -m pytest server/tests
+      - run: node --test addon/tests/*.test.js
+      - run: for f in addon/*.js; do node --check "$f"; done
+      - run: npm run test:build
+      - run: npx --yes web-ext lint --source-dir addon
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
+      - run: npm run build
+      - name: Check tag version
+        if: github.ref_type == 'tag'
+        run: test "v$(node -p "require('./addon/manifest.json').version")" = "${GITHUB_REF_NAME}"
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*.zip

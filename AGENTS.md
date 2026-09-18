@@ -11,7 +11,7 @@ extension renders the cues as real DOM text so Yomitan can scan them, and can mi
 plus sentence audio into the newest Anki card via AnkiConnect.
 
 ```
-addon/        Firefox extension, Manifest V3, plain JS, no build step
+addon/        Firefox source extension, Manifest V3, plain JS; directly loadable without a build
 server/       server.py (single file) + setup/run scripts; runtime data in ~/.shisu-ko
 docker/       Windows wrappers for docker compose, WSL Docker Engine installer
 Dockerfile, compose.yaml, compose.cpu.yaml, .env.example
@@ -25,7 +25,9 @@ sign-addon.cmd   signs the extension through addons.mozilla.org (needs the owner
   never shadow DOM. Yomitan and other popup dictionaries depend on it.
 - Never use `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `eval` or `script.src` in the content
   script. youtube.com enforces Trusted Types; only `textContent`/`createElement` style DOM code works.
-- The extension uses the `browser.*` promise API (Firefox). No `chrome.*` callbacks.
+- Application code uses the `browser.*` promise API. Firefox provides it natively; the shared
+  `browser-api.js` adapter supplies it on Chrome, where its internal bridge necessarily calls
+  `chrome.*` callbacks. Application code must not call `chrome.*` directly.
 - All overlay classes and flags use the `shisuko-` / `__shisuko` prefix.
 - Settings defaults live once in `addon/settings.js` (`SHISUKO_DEFAULT_SETTINGS`), loaded before
   `background.js`, `content.js` and `popup.js`. To add a setting, add it there and add the popup
@@ -134,13 +136,27 @@ Docker: `docker\up.cmd`, `docker\logs.cmd`, `docker\down.cmd` (or `docker compos
 `up.cmd` keeps a minimized "Shisu-ko WSL keep-alive" window open when Docker Engine runs inside
 WSL, because WSL stops the distro (and Docker) seconds after the last WSL session ends.
 
-Extension checks:
+Extension checks and browser packages:
 
 ```
-node --check addon/content.js addon/background.js addon/popup.js
+for file in addon/*.js; do node --check "$file"; done
 npx web-ext lint --source-dir addon
 npx web-ext build --source-dir addon --artifacts-dir dist --overwrite-dest --ignore-files "tests/**"
+
+npm ci
+npm test
+npm run build
+npx playwright install --with-deps chromium
+npm run test:browser
 ```
+
+`addon/manifest.json` is the Firefox source and remains directly loadable from
+`about:debugging`. `node scripts/build.mjs` derives Chrome from that source into `dist/chrome`;
+it never maintains a second application copy. `npm run watch` rebuilds after edits; reload the
+unpacked extension in `chrome://extensions` and reload the YouTube tab. The build writes
+versioned Firefox and Chrome ZIPs and excludes `addon/tests`, dotfiles, and development metadata.
+Chrome's `service-worker.js` loads `browser-api.js`, `settings.js`, and `background.js` in that
+order with classic `importScripts`, so settings globals retain the same behavior as Firefox.
 
 Server check: `python -W error -c "import ast; ast.parse(open('server/server.py', encoding='utf-8').read())"`.
 

@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/Multysquid/shisu-ko/actions/workflows/tests.yml/badge.svg)](https://github.com/Multysquid/shisu-ko/actions/workflows/tests.yml)
 
-Live Japanese subtitles for YouTube in Firefox: transcribed on your own machine by Whisper,
+Live Japanese subtitles for YouTube in Firefox and Chrome: transcribed on your own machine by Whisper,
 readable with [Yomitan](https://yomitan.wiki/), and mined into Anki without pressing a key.
 
 ![Shisu-ko on a YouTube video: hovering a subtitle pauses the video, Yomitan looks up シルバーウィーク, adding the card makes Shisu-ko attach the frame and the sentence audio, and Anki shows the finished card](docs/demo.gif)
@@ -38,6 +38,7 @@ audio from YouTube and the one-time model download.
 ## Requirements
 
 - Firefox 140 or newer.
+- Chrome 120 or newer (for the Chrome build).
 - For the native server: Python 3.10 or newer on the PATH, plus Node.js 20+ or Deno
   (yt-dlp needs a JavaScript runtime for YouTube). On Nix the flake provides all of this.
 - For the Docker server: Docker with the NVIDIA Container Toolkit (Docker Desktop on Windows
@@ -85,6 +86,17 @@ and a free [addons.mozilla.org API key](https://addons.mozilla.org/developers/ad
 (unlisted channel, nobody else sees it). Firefox Developer Edition, Nightly and ESR can instead
 load the unsigned zip with `xpinstall.signatures.required` set to `false` in `about:config`.
 
+Chrome development uses the same source. Run `npm ci` and `npm run build:chrome`, then open
+`chrome://extensions`, enable Developer mode, and choose **Load unpacked** on `dist/chrome`.
+After edits, run `npm run watch`; reload the extension on that page and reload the YouTube tab.
+The Firefox source remains directly loadable from `addon/manifest.json`. `npm run build` writes
+both unpacked trees and `dist/shisu-ko-<version>-{firefox,chrome}.zip`. For a Chrome release,
+download `shisu-ko-0.5.0-chrome.zip` from the [Chrome release](https://github.com/ForeverAnApple/shisu-ko/releases/latest),
+unzip it, and choose **Load unpacked** on the extracted folder. This ZIP is unsigned and is not a
+Chrome Web Store install; it has no automatic updates. Keep the extracted folder and reload the
+extension from `chrome://extensions` after updates. Chrome shortcuts are under
+`chrome://extensions/shortcuts`.
+
 ### 3. Watch
 
 Open any YouTube video. The badge in the top-left corner of the player goes from "Fetching
@@ -95,11 +107,12 @@ the switch in its header turns the whole extension off and on again.
 | Shortcut | Action |
 |---|---|
 | Alt+Shift+S | Turn Shisu-ko on or off (the switch in the popup header) |
-| Alt+Shift+T | Toggle the transcript panel |
+| Alt+Shift+L | Toggle the transcript panel |
 | Alt+Shift+M | Mine the current sentence (screenshot + audio) |
 | ← / → | Jump to the previous / next subtitle. Left replays the current line once you are more than a second into it. Can be turned off in the popup |
 
-Shortcuts can be changed in Firefox under Add-ons and themes > Manage Extension Shortcuts.
+Shortcuts can be changed in Firefox under Add-ons and themes > Manage Extension Shortcuts, or in
+Chrome at `chrome://extensions/shortcuts`.
 
 ## Reading with Yomitan
 
@@ -358,9 +371,12 @@ AGENTS.md             architecture notes, invariants and gotchas for contributor
 
 Checks:
 
-- Extension: `node --check addon/*.js`, `npx web-ext lint --source-dir addon`,
+- Extension: `for file in addon/*.js; do node --check "$file"; done`, `npx web-ext lint --source-dir addon`,
   `npx web-ext build --source-dir addon --artifacts-dir dist --ignore-files "tests/**"` (the
   tests folder is not shipped).
+- Browser packages: `npm ci`, `npm test`, `npm run build`, `npm run watch`, and `npm run test:browser`.
+  `nix build .#addon` and `nix build .#addon-chrome` build the two release packages. Refresh committed PNG
+  icons after changing `addon/icons/icon.svg` with `npm run refresh-icons` (ImageMagick required).
 - Server: `python -W error -c "import ast; ast.parse(open('server/server.py').read())"`,
   `server/run.cmd --check`. The planning, cue-building and live-follower code is pure and easy
   to unit test by importing `server.py` as a module (register it in `sys.modules` first because
@@ -377,6 +393,10 @@ pip install -r server/requirements-test.txt
 python -m pytest server/tests
 node --test addon/tests/*.test.js
 ```
+
+The browser smoke test uses a local fixture page and does not open a real video. The shared
+development commands are `npm ci`, `npm test`, `npm run build`, `npm run watch`, and
+`npm run test:browser`.
 
 The server suite covers window planning, interval merging, cue building and the hallucination
 gates, the preview decode, the live-stream buffer and follower (driven by a fake source and
