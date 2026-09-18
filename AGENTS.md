@@ -53,7 +53,9 @@ module (register it in `sys.modules` before `exec_module` because of `from __fut
 
 Before the whole track is decoded (seconds for a long video), `Fetcher.make_preview()` decodes a
 minute around the playhead into `Session.preview` (`(offset, samples)`) and marks the session
-ready; `plan_window()` then only plans inside the preview and `audio_slice()` serves it. The
+ready; `plan_window()` then only plans inside the preview and `audio_slice()` serves it. When the
+playhead is within the first minute, a yt-dlp progress hook already runs that preview on the growing
+`.part` file once enough bytes are in, so the first cues arrive while the download continues. The
 full decode replaces it with `Session.audio` and clears the preview.
 
 ## How automatic mining works

@@ -306,6 +306,22 @@ def probe_duration(path: Path) -> Optional[float]:
     return None
 
 
+# The preview can start before the download finishes: a prefix of a WebM/Opus (or m4a with a
+# leading moov atom) file decodes up to where the data stops.
+EARLY_PREVIEW_MAX_START = 60.0        # past the first minute the prefix does not hold what the viewer needs
+EARLY_PREVIEW_MIN_BYTES = 256 * 1024  # enough for the container header and the first clusters
+EARLY_PREVIEW_MARGIN = 5.0            # seconds of slack on top of the preview range
+DEFAULT_AUDIO_BITRATE = 160.0         # kbit/s assumed when yt-dlp reports none
+
+
+def stream_bytes_per_second(hook_data: dict, fallback_abr: float) -> float:
+    """Download bytes per second of audio, from the average bitrate yt-dlp reports."""
+    abr = (hook_data.get("info_dict") or {}).get("abr")
+    if not isinstance(abr, (int, float)) or abr <= 0:
+        abr = fallback_abr if fallback_abr > 0 else DEFAULT_AUDIO_BITRATE
+    return float(abr) * 1000.0 / 8.0
+
+
 class Fetcher:
     def __init__(self, args):
         self.args = args
@@ -321,7 +337,7 @@ class Fetcher:
                 runtimes[name] = {}
         return runtimes or {"deno": {}}
 
-    def ytdlp_options(self, video_id: str) -> dict:
+    def ytdlp_options(self, video_id: str, progress_hook=None) -> dict:
         opts = {
             "format": "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
             "outtmpl": str(CACHE_DIR / f"{video_id}.%(ext)s"),
@@ -340,6 +356,8 @@ class Fetcher:
             opts["cookiefile"] = self.args.cookies
         if self.args.allow_remote_ejs:
             opts["remote_components"] = ["ejs:github"]
+        if progress_hook is not None:
+            opts["progress_hooks"] = [progress_hook]
         return opts
 
     def fetch(self, s: Session) -> None:
@@ -354,10 +372,13 @@ class Fetcher:
             else:
                 log.info("[%s] using cached audio %s", s.video_id, path.name)
             with s.lock:
-                s.status = "decoding"
+                have_preview = s.preview is not None  # the download hook already published one
+                if not have_preview:
+                    s.status = "decoding"
             # Decoding a 40-minute track takes seconds; a few windows around the playhead take
             # milliseconds, so the first subtitles appear before the full decode finishes.
-            self.make_preview(s, path)
+            if not have_preview:
+                self.make_preview(s, path)
             from faster_whisper.audio import decode_audio
 
             audio = decode_audio(str(path), sampling_rate=SAMPLE_RATE)
@@ -374,43 +395,96 @@ class Fetcher:
                 s.status = "error"
                 s.error = friendly_error(exc)
                 s.error_at = time.time()
+                s.preview = None  # a preview from a partial download must not outlive the failure
         finally:
             with s.lock:
                 s.fetching = False
 
-    def make_preview(self, s: Session, path: Path) -> None:
-        """Decode a couple of windows around the playhead so the transcriber can start right away."""
+    def preview_range(self, s: Session, duration: float) -> tuple:
+        """The [start, end) seconds a preview should cover for the current playhead."""
+        with s.lock:
+            start = max(0.0, s.want_t - 1.0)
+        return start, min(float(duration), start + self.args.first_window + self.args.window + 2.0)
+
+    def make_preview(self, s: Session, path: Path) -> bool:
+        """Decode a couple of windows around the playhead so the transcriber can start right away.
+
+        `path` may be a partially downloaded file: decoding simply stops where the data does.
+        """
         try:
             duration = probe_duration(path) or s.duration_hint
             if not duration or duration <= 0:
-                return  # unknown length: plan_window cannot work, so skip the preview entirely
-            with s.lock:
-                start = max(0.0, s.want_t - 1.0)
-            end = min(float(duration), start + self.args.first_window + self.args.window + 2.0)
+                return False  # unknown length: plan_window cannot work, so skip the preview entirely
+            start, end = self.preview_range(s, duration)
             if end - start < 1.5:
-                return
+                return False
             samples = _decode_range(path, start, end, rate=SAMPLE_RATE)
             if len(samples) < SAMPLE_RATE * 1.5:
-                return
+                return False
             preview = np.ascontiguousarray(samples, dtype=np.float32) / 32768.0
             with s.lock:
+                # The full decode may have landed while this ran, and a failed download must stay failed.
+                if s.audio is not None or s.status == "error":
+                    return False
                 s.preview = (start, preview)
                 s.duration = float(duration)
                 s.status = "ready"
             log.info("[%s] preview %s-%s ready while the full audio decodes",
                      s.video_id, fmt_time(start), fmt_time(start + len(preview) / SAMPLE_RATE))
+            return True
         except Exception as exc:  # noqa: BLE001
             log.debug("[%s] preview decode skipped: %s", s.video_id, exc)
+            return False
+
+    def progress_hook(self, s: Session, state: dict):
+        """Watch the download and start the preview as soon as the file holds enough audio.
+
+        Runs on yt-dlp's download thread, so it stays cheap, never raises and never blocks.
+        """
+        def hook(d):
+            try:
+                if state["fired"] or d.get("status") != "downloading":
+                    return
+                downloaded = d.get("downloaded_bytes") or 0
+                tmp = d.get("tmpfilename") or d.get("filename")
+                if not tmp or downloaded < EARLY_PREVIEW_MIN_BYTES:
+                    return
+                with s.lock:
+                    want, duration = s.want_t, s.duration_hint
+                if duration <= 0 or want > EARLY_PREVIEW_MAX_START:
+                    return  # after a seek deep into the video the prefix holds the wrong audio
+                _, end = self.preview_range(s, duration)
+                if downloaded < (end + EARLY_PREVIEW_MARGIN) * stream_bytes_per_second(d, state["abr"]):
+                    return
+                state["fired"] = True
+                threading.Thread(target=self.early_preview, args=(s, Path(tmp)), daemon=True,
+                                 name=f"preview-{s.video_id}").start()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("[%s] download progress hook failed: %s", s.video_id, exc)
+
+        return hook
+
+    def early_preview(self, s: Session, path: Path) -> None:
+        """Preview decoded from the growing .part file, while yt-dlp is still downloading."""
+        with s.lock:
+            if s.preview is not None or s.audio is not None:
+                return
+        if self.make_preview(s, path):
+            log.info("[%s] transcribing from the partial download", s.video_id)
+        else:
+            log.debug("[%s] the partial download did not decode yet; waiting for the full file", s.video_id)
 
     def download(self, s: Session) -> Path:
         import yt_dlp
 
         url = f"https://www.youtube.com/watch?v={s.video_id}"
-        with yt_dlp.YoutubeDL(self.ytdlp_options(s.video_id)) as ydl:
+        state = {"fired": False, "abr": 0.0}  # shared with the progress hook below
+        with yt_dlp.YoutubeDL(self.ytdlp_options(s.video_id, self.progress_hook(s, state))) as ydl:
             info = ydl.extract_info(url, download=False)
             if info.get("is_live"):
                 raise RuntimeError("Live streams are not supported yet")
-            hint = info.get("duration")
+            hint, abr = info.get("duration"), info.get("abr")
+            state["abr"] = float(abr) if isinstance(abr, (int, float)) else 0.0
             with s.lock:
                 s.title = info.get("title") or ""
                 s.duration_hint = float(hint) if isinstance(hint, (int, float)) else 0.0
