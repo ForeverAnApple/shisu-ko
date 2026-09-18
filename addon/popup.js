@@ -25,13 +25,22 @@ function readForm() {
   return patch;
 }
 
+// Each range shows its value and paints the travelled part of its own track (the --fill custom
+// property; see popup.css), so the slider carries the value twice: by position and by length.
+const RANGES = {
+  fontScale: (v) => `${Math.round(v * 100)}%`,
+  lingerSeconds: (v) => `${v.toFixed(1)} s`,
+  clipPaddingMs: (v) => `${v} ms`,
+};
+
 function updateOutputs() {
-  const scale = Number(document.getElementById("fontScale").value);
-  const linger = Number(document.getElementById("lingerSeconds").value);
-  const padding = Number(document.getElementById("clipPaddingMs").value);
-  document.getElementById("fontScaleOut").textContent = `${Math.round(scale * 100)}%`;
-  document.getElementById("lingerOut").textContent = `${linger.toFixed(1)} s`;
-  document.getElementById("clipPaddingOut").textContent = `${padding} ms`;
+  for (const [id, format] of Object.entries(RANGES)) {
+    const el = document.getElementById(id);
+    const value = Number(el.value);
+    const min = Number(el.min);
+    el.style.setProperty("--fill", `${((value - min) / (Number(el.max) - min)) * 100}%`);
+    document.getElementById(`${id}Out`).textContent = format(value);
+  }
 }
 
 function onChange(ev) {
@@ -43,18 +52,24 @@ function onChange(ev) {
   }, 150);
 }
 
+// The status line answers the popup's first question: can it transcribe right now? The badge word
+// and its dot carry the state, the detail line the evidence (which model, which device) or the fix.
 async function checkServer() {
-  const el = document.getElementById("server-status");
-  el.textContent = "Checking server…";
-  el.className = "status";
+  const badge = document.getElementById("server-status");
+  const detail = document.getElementById("server-detail");
+  badge.textContent = "Checking server";
+  badge.className = "badge";
+  detail.textContent = "";
   const res = await browser.runtime.sendMessage({ type: "api", path: "/health" }).catch(() => null);
   if (res && res.ok && res.data) {
     const d = res.data;
-    el.textContent = `Server online · ${d.model} on ${d.device} (${d.compute_type})`;
-    el.className = "status ok";
+    badge.textContent = "Server online";
+    badge.className = "badge ok";
+    detail.textContent = `${d.model} · ${d.device} · ${d.compute_type}`;
   } else {
-    el.textContent = "Server offline. Run server/run.cmd or docker/up.cmd";
-    el.className = "status bad";
+    badge.textContent = "Server offline";
+    badge.className = "badge bad";
+    detail.textContent = "start server/run.cmd or docker/up.cmd";
   }
 }
 

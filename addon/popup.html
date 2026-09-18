@@ -6,101 +6,121 @@
 </head>
 <body>
   <header>
-    <img src="icons/icon.svg" alt="" width="30" height="30">
-    <div>
-      <h1>Shisu-ko</h1>
-      <div id="server-status" class="status">Checking server&hellip;</div>
+    <img src="icons/icon.svg" alt="" width="28" height="28">
+    <h1>Shisu-ko</h1>
+    <div class="statusline">
+      <span id="server-status" class="badge">Checking server</span>
+      <span id="server-detail" class="detail"></span>
     </div>
   </header>
+
   <main>
     <div id="permission-banner" class="banner hidden">
       <p>Shisu-ko cannot see YouTube pages yet.</p>
       <button id="grant-permission" type="button">Allow on YouTube</button>
     </div>
-    <h2>Subtitles</h2>
-    <label class="row">
-      <input type="checkbox" id="enabled">
-      <span>Show subtitles <kbd>Alt+Shift+S</kbd></span>
-    </label>
-    <label class="row">
-      <input type="checkbox" id="pauseOnHover">
-      <span>Pause the video while a subtitle is hovered (for Yomitan lookups)</span>
-    </label>
-    <label class="row">
-      <input type="checkbox" id="showTranscript">
-      <span>Show transcript panel <kbd>Alt+Shift+T</kbd></span>
-    </label>
-    <label class="row">
-      <input type="checkbox" id="hideNativeCaptions">
-      <span>Hide YouTube's own captions</span>
-    </label>
-    <label class="row">
-      <input type="checkbox" id="showStatus">
-      <span>Show progress messages on the video</span>
-    </label>
-    <label class="row range">
-      <span>Font size <output id="fontScaleOut"></output></span>
-      <input type="range" id="fontScale" min="0.6" max="2.2" step="0.05">
-    </label>
-    <label class="row range">
-      <span>Keep subtitle after speech ends <output id="lingerOut"></output></span>
-      <input type="range" id="lingerSeconds" min="0" max="8" step="0.5">
-    </label>
 
-    <h2>Sentence mining <kbd>Alt+Shift+M</kbd></h2>
-    <p class="hint">Hover a subtitle, add the card with Yomitan, done: Shisu-ko sees the new card and attaches the frame you were looking at plus the sentence audio. The shortcut and the &#9935; button still mine on demand.</p>
-    <label class="row">
-      <input type="checkbox" id="autoMine">
-      <span>Attach automatically when Yomitan adds a card (no shortcut needed)</span>
-    </label>
-    <label class="row text">
-      <span>Send screenshot and audio to</span>
-      <select id="mineTarget">
-        <option value="anki">Anki: the newest card (via AnkiConnect)</option>
-        <option value="download">Downloads folder</option>
-      </select>
-    </label>
-    <label class="row">
-      <input type="checkbox" id="mineFallbackDownload">
-      <span>If Anki is unreachable, save to Downloads instead</span>
-    </label>
-    <label class="row text">
-      <span>AnkiConnect URL</span>
-      <input type="text" id="ankiUrl" spellcheck="false">
-    </label>
-    <div class="grid">
-      <label class="row text">
-        <span>Image field</span>
-        <input type="text" id="ankiImageField" spellcheck="false">
+    <section>
+      <h2>Subtitles</h2>
+      <label class="row check">
+        <input type="checkbox" id="enabled">
+        <span>Show subtitles</span>
+        <kbd>Alt+Shift+S</kbd>
       </label>
-      <label class="row text">
-        <span>Audio field</span>
-        <input type="text" id="ankiAudioField" spellcheck="false">
+      <label class="row check">
+        <input type="checkbox" id="pauseOnHover">
+        <span>Pause video while hovering a line</span>
       </label>
-    </div>
-    <label class="row text">
-      <span>Sentence field (optional, only filled when empty)</span>
-      <input type="text" id="ankiSentenceField" spellcheck="false">
-    </label>
-    <label class="row range">
-      <span>Audio padding around the sentence <output id="clipPaddingOut"></output></span>
-      <input type="range" id="clipPaddingMs" min="0" max="1000" step="50">
-    </label>
-    <label class="row text">
-      <span>Audio format</span>
-      <select id="clipFormat">
-        <option value="mp3">MP3 (small)</option>
-        <option value="wav">WAV (uncompressed)</option>
-      </select>
-    </label>
+      <label class="row check">
+        <input type="checkbox" id="showTranscript">
+        <span>Transcript panel</span>
+        <kbd>Alt+Shift+T</kbd>
+      </label>
+    </section>
 
-    <h2>Server</h2>
-    <label class="row text">
-      <span>Shisu-ko server URL</span>
-      <input type="text" id="serverUrl" spellcheck="false">
-    </label>
+    <section>
+      <h2>Mining</h2>
+      <label class="row check">
+        <input type="checkbox" id="autoMine">
+        <span>Auto-attach to new Yomitan cards</span>
+      </label>
+      <p class="hint"><kbd>Alt+Shift+M</kbd> mines the current line by hand.</p>
+    </section>
+
+    <section>
+      <h2>Display</h2>
+      <label class="row range">
+        <span class="lead">Font size</span>
+        <output id="fontScaleOut"></output>
+        <input type="range" id="fontScale" min="0.6" max="2.2" step="0.05">
+      </label>
+      <label class="row range">
+        <span class="lead">Keep line after speech</span>
+        <output id="lingerSecondsOut"></output>
+        <input type="range" id="lingerSeconds" min="0" max="8" step="0.5">
+      </label>
+      <label class="row check">
+        <input type="checkbox" id="hideNativeCaptions">
+        <span>Hide YouTube's own captions</span>
+      </label>
+      <label class="row check">
+        <input type="checkbox" id="showStatus">
+        <span>Show progress messages on the video</span>
+      </label>
+    </section>
+
+    <details>
+      <summary>Anki, clips and server</summary>
+      <div class="drawer">
+        <label class="row field">
+          <span class="lead">Send screenshot and audio to</span>
+          <select id="mineTarget">
+            <option value="anki">Anki, newest card</option>
+            <option value="download">Downloads folder</option>
+          </select>
+        </label>
+        <label class="row check">
+          <input type="checkbox" id="mineFallbackDownload">
+          <span>Save to Downloads if Anki is unreachable</span>
+        </label>
+        <label class="row field">
+          <span class="lead">AnkiConnect URL</span>
+          <input type="text" id="ankiUrl" spellcheck="false">
+        </label>
+        <div class="grid">
+          <label class="row field">
+            <span class="lead">Image field</span>
+            <input type="text" id="ankiImageField" spellcheck="false">
+          </label>
+          <label class="row field">
+            <span class="lead">Audio field</span>
+            <input type="text" id="ankiAudioField" spellcheck="false">
+          </label>
+        </div>
+        <label class="row field">
+          <span class="lead">Sentence field <span class="soft">optional, filled only when empty</span></span>
+          <input type="text" id="ankiSentenceField" spellcheck="false">
+        </label>
+        <label class="row range">
+          <span class="lead">Audio padding</span>
+          <output id="clipPaddingMsOut"></output>
+          <input type="range" id="clipPaddingMs" min="0" max="1000" step="50">
+        </label>
+        <label class="row field">
+          <span class="lead">Audio format</span>
+          <select id="clipFormat">
+            <option value="mp3">MP3</option>
+            <option value="wav">WAV</option>
+          </select>
+        </label>
+        <label class="row field">
+          <span class="lead">Shisu-ko server URL</span>
+          <input type="text" id="serverUrl" spellcheck="false">
+        </label>
+      </div>
+    </details>
   </main>
-  <footer>Start the server with <code>server/run.cmd</code> or <code>docker/up.cmd</code>. Subtitles are plain page text, so Yomitan can scan them.</footer>
+
   <script src="settings.js"></script>
   <script src="popup.js"></script>
 </body>
