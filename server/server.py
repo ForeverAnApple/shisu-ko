@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlsplit
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 SAMPLE_RATE = 16000
 APP_DIR = Path(os.environ.get("SHISUKO_HOME") or (Path.home() / ".shisu-ko"))
 CACHE_DIR = APP_DIR / "cache"
