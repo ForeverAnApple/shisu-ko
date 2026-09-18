@@ -178,6 +178,13 @@ uses port 8790 precisely so that AnkiConnect can keep its default 8765.
 
 ## Settings (toolbar popup)
 
+![Popup, dark theme](docs/images/popup-dark.png)
+
+Subtitle style settings live in their own drawer; the screenshot below shows mincho, a raised
+position, a lighter box, an outline, and the transcript docked left:
+
+![Overlay with custom style](docs/images/overlay-styled.png)
+
 | Setting | Meaning |
 |---|---|
 | Show subtitles | Master switch for the overlay |
