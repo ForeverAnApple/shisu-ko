@@ -587,12 +587,14 @@
       }
     }
     if (!s.showStatus && !isError) text = null;
+    // Only touch the DOM when something changed: every mutation wakes other extensions'
+    // observers (Bitwarden re-walks the whole page after each one).
     if (!text) {
       el.classList.add("shisuko-hidden");
       return;
     }
-    el.textContent = text;
-    el.classList.toggle("shisuko-status-error", isError);
+    if (el.textContent !== text) el.textContent = text;
+    if (el.classList.contains("shisuko-status-error") !== isError) el.classList.toggle("shisuko-status-error", isError);
     el.classList.remove("shisuko-hidden");
   }
 
