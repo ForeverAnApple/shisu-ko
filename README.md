@@ -64,6 +64,7 @@ long segments into subtitle-sized cues at Japanese punctuation. Cues are saved p
 - Firefox 140 or newer.
 - For the native server: Python 3.10 or newer on the PATH, plus Node.js 20+ or Deno
   (yt-dlp needs a JavaScript runtime for YouTube).
+  On Nix the flake provides all of this.
 - For the Docker server: Docker with the NVIDIA Container Toolkit (Docker Desktop on Windows
   has it built in). The image already contains Deno.
 - An NVIDIA GPU with about 4 GB of free VRAM for large-v3. With less free memory the server
@@ -83,6 +84,12 @@ yt-dlp and the CUDA runtime libraries; nothing else on the system is touched. Th
 downloads the Whisper large-v3 model (about 3 GB) into `~/.shisu-ko/models`. The server is ready
 when it prints `Listening on http://127.0.0.1:8790`. Keep the window open while you watch; it
 restarts itself if it ever crashes.
+
+**Nix / NixOS:** `nix run github:ForeverAnApple/shisu-ko` (or `nix run .` in a checkout) starts the
+server with CUDA support; `nix run .#check` prints diagnostics; `nix develop` opens a shell with
+Python, web-ext, Node and Deno for development. The flake builds CTranslate2 with CUDA from the
+`cache.nixos-cuda.org` binary cache, so add it to your substituters or expect a long build. To keep the
+server running in the background: `systemd-run --user --unit=shisu-ko nix run /path/to/shisu-ko`.
 
 **Docker:** copy `.env.example` to `.env`, set `DATA_DIR` to where models and caches should
 live, then run `docker\up.cmd` (Windows) or `docker compose up -d`. See [Docker](#docker) below.
@@ -275,6 +282,8 @@ AGENTS.md             architecture notes, invariants and gotchas for contributor
 - Data lives in `~/.shisu-ko` (override with `SHISUKO_HOME`): `venv/`, `models/`, `cache/`.
 
 ## Tests
+- Nix: `nix develop` gives the Python environment, `web-ext`, Node and Deno; `nix run .#tests`
+  runs both test suites; `nix build .#addon` produces the extension zip.
 
 Automated tests cover the pure logic on both sides — no GPU, network or Firefox required — and
 run in CI (see the badge at the top of this file) on every push and pull request via

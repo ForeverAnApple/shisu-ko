@@ -15,6 +15,7 @@ addon/        Firefox extension, Manifest V3, plain JS, no build step
 server/       server.py (single file) + setup/run scripts; runtime data in ~/.shisu-ko
 docker/       Windows wrappers for docker compose, WSL Docker Engine installer
 Dockerfile, compose.yaml, compose.cpu.yaml, .env.example
+flake.nix        Nix package/app/dev shell for the server and the extension build
 sign-addon.cmd   signs the extension through addons.mozilla.org (needs the owner's API key)
 ```
 
@@ -77,6 +78,10 @@ pip install -r server/requirements-test.txt && python -m pytest server/tests
 node --test addon/tests/*.test.js
 ```
 
+Nix (any Linux with flakes, NixOS): `nix run . -- [options]` starts the server with CUDA
+(`flake.nix`; CTranslate2 comes prebuilt from `cache.nixos-cuda.org`, onnxruntime is the CPU build
+because only the VAD uses it). `nix run .#check`, `nix run .#tests`, `nix build .#addon`,
+`nix develop` for a shell with Python, web-ext, Node and Deno. `.#server-cpu` is the CUDA-free variant.
 `server/tests/_serverlib.py` loads `server.py` the way this file already recommends above
 (`sys.modules` registration before `exec_module`). `addon/tests/_loadBackground.js` runs
 `background.js` in a Node `vm` sandbox with `browser`/`fetch`/`btoa` stubbed out — top-level
