@@ -18,6 +18,9 @@
 (() => {
   if (window.__shisukoLoaded) return;
   window.__shisukoLoaded = true;
+  // A reloaded or updated extension leaves this instance orphaned with a dead runtime; it must
+  // tear itself down so the fresh instance can take over the player (see runtimeAlive()).
+  const timers = [];
 
   const DEFAULT_SETTINGS = SHISUKO_DEFAULT_SETTINGS; // from settings.js
 
@@ -75,6 +78,30 @@
   };
 
   // ------------------------------------------------------------ helpers
+
+  function runtimeAlive() {
+    try {
+      return !!(browser.runtime && browser.runtime.id);
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function shutdown() {
+    for (const t of timers) clearInterval(t);
+    timers.length = 0;
+    detach();
+    clearHoverCapture();
+    clearResumeTimer();
+    if (state.root) state.root.remove();
+    state.root = null;
+    document.documentElement.classList.remove("shisuko-hide-native");
+    try {
+      delete window.__shisukoLoaded;
+    } catch (err) {
+      window.__shisukoLoaded = false;
+    }
+  }
 
   function sendMessage(msg) {
     try {
@@ -267,6 +294,10 @@
   // ------------------------------------------------------------ discovery
 
   function discover() {
+    if (!runtimeAlive()) {
+      shutdown();
+      return;
+    }
     const player = document.querySelector("#movie_player") || document.querySelector(".html5-video-player");
     const video = player
       ? player.querySelector("video.html5-main-video") || player.querySelector("video")
@@ -924,12 +955,12 @@
 
   loadSettings().then(() => {
     discover();
-    setInterval(discover, DISCOVER_INTERVAL_MS);
-    setInterval(sync, SYNC_INTERVAL_MS);
-    setInterval(render, RENDER_INTERVAL_MS);
-    setInterval(() => {
+    timers.push(setInterval(discover, DISCOVER_INTERVAL_MS));
+    timers.push(setInterval(sync, SYNC_INTERVAL_MS));
+    timers.push(setInterval(render, RENDER_INTERVAL_MS));
+    timers.push(setInterval(() => {
       if (state.settings.autoMine && !state.offline && (state.hoverPaused || state.awaitingPlayerMove)) pollForNewCard();
-    }, HOVER_POLL_INTERVAL_MS);
+    }, HOVER_POLL_INTERVAL_MS));
     document.addEventListener("yt-navigate-finish", () => setTimeout(discover, 50));
     document.addEventListener("fullscreenchange", () => setTimeout(updateFontSize, 100));
   });
