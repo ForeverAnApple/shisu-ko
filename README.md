@@ -136,7 +136,10 @@ timestamps seek the video.
 
 Mining captures two things for the sentence you are looking at: a screenshot of the video frame
 and an MP3 clip of the sentence audio, cut from the original track with a little padding on both
-sides. It runs by itself the moment Yomitan adds a card. To trigger it by hand instead:
+sides. A long sentence is shown as several short subtitle lines, but mining always works on the
+whole sentence: the clip spans it, and the card's sentence field is grown from the single line
+Yomitan copied to the full sentence, keeping the bold around the word you looked up. It runs by
+itself the moment Yomitan adds a card. To trigger it by hand instead:
 
 - hover the subtitle and click the pickaxe button that appears at its right edge,
 - press Alt+Shift+M while watching,

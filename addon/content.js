@@ -25,7 +25,7 @@
   const DEFAULT_SETTINGS = SHISUKO_DEFAULT_SETTINGS; // from settings.js
 
   const SYNC_INTERVAL_MS = 1000;
-  const RENDER_INTERVAL_MS = 200;
+  const RENDER_INTERVAL_MS = 100;
   const DISCOVER_INTERVAL_MS = 750;
   const RESUME_DELAY_MS = 350;
   const TOAST_MS = 3500;
@@ -34,6 +34,8 @@
   const HOVER_CAPTURE_DELAY_MS = 400;
   const ANKI_POLL_LOG_MS = 60000;
   const HOVER_POLL_INTERVAL_MS = 300; // a card is most likely to appear while a subtitle is hovered
+  // A blank shorter than this reads as a flicker rather than a pause, so the text is held instead.
+  const MIN_BLANK_S = 0.3;
 
   const state = {
     settings: Object.assign({}, DEFAULT_SETTINGS),
@@ -448,11 +450,15 @@
     let added = false;
     for (const raw of incoming) {
       if (!raw || typeof raw.text !== "string") continue;
+      const seg = Number(raw.seg);
       const cue = {
         id: Number(raw.id),
         start: Number(raw.start) || 0,
         end: Number(raw.end) || 0,
         text: raw.text.trim(),
+        // Cues built from one Whisper segment share a `seg`; an older server sends none, and then
+        // every cue is a sentence of its own (see sentenceForCue).
+        seg: Number.isFinite(seg) ? seg : null,
       };
       if (!cue.text || !Number.isFinite(cue.id) || seen.has(cue.id)) continue;
       seen.add(cue.id);
@@ -497,11 +503,15 @@
       const c = cues[i];
       if (t >= c.start - 0.05 && t <= c.end + 0.05) return c;
     }
+    // Past every candidate's end: keep the newest one up for a moment. A cue that arrived late and
+    // sorted in behind the playhead only shortens that moment, because `next` is always the cue
+    // following `last` in the current, freshly sorted array.
     const last = cues[idx];
     const next = cues[idx + 1];
+    if (next && t >= next.start) return null;
     const linger = Math.max(0, Number(state.settings.lingerSeconds) || 0);
-    if (t <= last.end + linger && (!next || t < next.start)) return last;
-    return null;
+    const until = next && next.start - last.end < MIN_BLANK_S ? next.start : last.end + linger;
+    return t <= until ? last : null;
   }
 
   function render() {
@@ -712,6 +722,23 @@
     return best;
   }
 
+  // The whole spoken sentence a cue belongs to. The server splits one Whisper segment into several
+  // short cues and marks them with the same `seg`, so joining those in start order gives back the
+  // sentence, and their outer bounds give its audio range. Pure: cues in, sentence out.
+  function sentenceForCue(cues, cue) {
+    if (!cue) return null;
+    const own = { start: cue.start, end: cue.end, text: cue.text };
+    if (!Number.isFinite(cue.seg)) return own;
+    const parts = cues.filter((c) => c && c.seg === cue.seg);
+    if (parts.length < 2) return own;
+    parts.sort((a, b) => a.start - b.start || a.end - b.end);
+    return {
+      start: Math.min(...parts.map((c) => c.start)),
+      end: Math.max(...parts.map((c) => c.end)),
+      text: parts.map((c) => c.text).join(""),
+    };
+  }
+
   function captureFrame(video) {
     if (!video) return null;
     const w = video.videoWidth;
@@ -820,6 +847,7 @@
         type: "mine",
         videoId: state.videoId,
         cue: { start: cue.start, end: cue.end, text: cue.text },
+        sentence: sentenceForCue(state.cues, cue),
         imageDataUrl,
         noteId: opts.noteId,
         auto: !!opts.auto,

@@ -412,3 +412,191 @@ test("addToAnki references the filename Anki reports back, not the one it asked 
   assert.equal(update.params.note.fields.Picture, '<img src="shisuko_saxvvpduw24_6380.jpg">');
   assert.equal(update.params.note.fields.SentenceAudio, "[sound:shisuko_saxvvpduw24_6380.mp3]");
 });
+
+// ------------------------------------------------------------------ the whole sentence, not the cue
+
+// The server splits one spoken sentence into several short cues; the content script joins the cues
+// sharing a `seg` and sends the result as msg.sentence. Everything below is about that join being
+// what reaches Anki: the clip covers it, the guard compares against it, the card keeps it.
+
+test("extendSentenceField grows a fragment into the full sentence and keeps Yomitan's bold", () => {
+  const { sandbox } = loadBackground();
+  assert.equal(
+    sandbox.extendSentenceField("これは<b>猫</b>です。", "これは猫です。とても可愛い。"),
+    "これは<b>猫</b>です。とても可愛い。"
+  );
+});
+
+test("extendSentenceField writes the sentence plain when the bold word cannot be located", () => {
+  const { sandbox } = loadBackground();
+  // Normalising drops the space inside the bold span, so "thecat" is not in the raw sentence.
+  assert.equal(
+    sandbox.extendSentenceField("Look at <b>the cat</b>.", "Look at the cat. It sleeps."),
+    "Look at the cat. It sleeps."
+  );
+});
+
+test("extendSentenceField leaves a field that already holds the whole sentence alone", () => {
+  const { sandbox } = loadBackground();
+  assert.equal(sandbox.extendSentenceField("これは<b>猫</b>です。", "これは猫です。"), null);
+  assert.equal(sandbox.extendSentenceField("これは<b>猫</b>です。とても可愛い。", "これは猫です。とても可愛い。"), null);
+});
+
+test("extendSentenceField refuses text that is not part of the sentence", () => {
+  const { sandbox } = loadBackground();
+  assert.equal(sandbox.extendSentenceField("まったく別の文です。", "これは猫です。とても可愛い。"), null);
+  assert.equal(sandbox.extendSentenceField("", "これは猫です。"), null);
+});
+
+test("addToAnki rewrites the sentence field to the whole sentence and says so", async () => {
+  const anki = ankiFetch({
+    requestPermission: granted,
+    notesInfo: () => noteFields("これは<b>猫</b>です。"),
+    storeMediaFile: (p) => p.filename,
+    updateNoteFields: null,
+  });
+  const { sandbox } = loadBackground({ fetch: anki.fetch });
+  const settings = await sandbox.getSettings(); // ankiSentenceField unset: the guard's "Sentence"
+  const res = await sandbox.addToAnki(settings, { text: "これは猫です。" }, MEDIA.image, MEDIA.audio, 555, {
+    start: 10,
+    end: 14,
+    text: "これは猫です。とても可愛い。",
+  });
+
+  assert.equal(res.ok, true, JSON.stringify(res));
+  const update = anki.calls.find((c) => c.action === "updateNoteFields");
+  assert.equal(update.params.note.fields.Sentence, "これは<b>猫</b>です。とても可愛い。");
+  assert.match(res.message, /sentence/i);
+});
+
+test("addToAnki leaves a sentence field that is already complete untouched", async () => {
+  const anki = ankiFetch({
+    requestPermission: granted,
+    notesInfo: () => noteFields("これは<b>猫</b>です。とても可愛い。"),
+    storeMediaFile: (p) => p.filename,
+    updateNoteFields: null,
+  });
+  const { sandbox } = loadBackground({ fetch: anki.fetch });
+  const settings = await sandbox.getSettings();
+  const res = await sandbox.addToAnki(settings, { text: "これは猫です。" }, MEDIA.image, MEDIA.audio, 555, {
+    start: 10,
+    end: 14,
+    text: "これは猫です。とても可愛い。",
+  });
+
+  assert.equal(res.ok, true, JSON.stringify(res));
+  const update = anki.calls.find((c) => c.action === "updateNoteFields");
+  assert.ok(!("Sentence" in update.params.note.fields), "a complete sentence must not be rewritten");
+  assert.doesNotMatch(res.message, /sentence extended/i);
+});
+
+test("addToAnki accepts a note whose sentence matches a neighbouring cue of the same segment", async () => {
+  // Yomitan copied its sentence from the cue after the one being mined. Comparing against the cue
+  // alone would call this a different card; comparing against the joined sentence gets it right.
+  const anki = ankiFetch({
+    requestPermission: granted,
+    notesInfo: () => noteFields("とても<b>可愛い</b>。"),
+    storeMediaFile: (p) => p.filename,
+    updateNoteFields: null,
+  });
+  const { sandbox } = loadBackground({ fetch: anki.fetch });
+  const settings = await sandbox.getSettings();
+  const res = await sandbox.addToAnki(settings, { text: "これは猫です。" }, MEDIA.image, MEDIA.audio, 555, {
+    start: 10,
+    end: 14,
+    text: "これは猫です。とても可愛い。",
+  });
+
+  assert.equal(res.ok, true, JSON.stringify(res));
+  const update = anki.calls.find((c) => c.action === "updateNoteFields");
+  assert.equal(update.params.note.fields.Sentence, "これは猫です。とても<b>可愛い</b>。");
+});
+
+test("addToAnki still refuses an unrelated note, and writes no sentence into it", async () => {
+  const anki = ankiFetch({
+    requestPermission: granted,
+    notesInfo: () => noteFields("まったく別の文です。"),
+    storeMediaFile: (p) => p.filename,
+    updateNoteFields: null,
+  });
+  const { sandbox } = loadBackground({ fetch: anki.fetch });
+  const settings = await sandbox.getSettings();
+  const res = await sandbox.addToAnki(settings, { text: "これは猫です。" }, MEDIA.image, MEDIA.audio, 555, {
+    start: 10,
+    end: 14,
+    text: "これは猫です。とても可愛い。",
+  });
+
+  assert.equal(res.ok, false);
+  assert.equal(res.mismatch, true);
+  assert.ok(!anki.actions().includes("updateNoteFields"), "nothing may be written to a mismatched note");
+});
+
+test("addToAnki fills an empty sentence field with the whole sentence when one is configured", async () => {
+  const storage = makeMemoryStorage({ settings: { ankiSentenceField: "Sentence" } });
+  const anki = ankiFetch({
+    requestPermission: granted,
+    notesInfo: () => noteFields(""),
+    storeMediaFile: (p) => p.filename,
+    updateNoteFields: null,
+  });
+  const { sandbox } = loadBackground({ storage, fetch: anki.fetch });
+  const settings = await sandbox.getSettings();
+  const res = await sandbox.addToAnki(settings, { text: "これは猫です。" }, MEDIA.image, MEDIA.audio, 555, {
+    start: 10,
+    end: 14,
+    text: "これは猫です。とても可愛い。",
+  });
+
+  assert.equal(res.ok, true, JSON.stringify(res));
+  const update = anki.calls.find((c) => c.action === "updateNoteFields");
+  assert.equal(update.params.note.fields.Sentence, "これは猫です。とても可愛い。");
+});
+
+test("mineCue cuts the clip over the sentence but names the file after the cue", async () => {
+  const storage = makeMemoryStorage({ settings: { mineTarget: "download" } }); // clipPaddingMs 200 ms
+  const urls = [];
+  const fetch = async (url) => {
+    urls.push(String(url));
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => "audio/mpeg" },
+      arrayBuffer: async () => new Uint8Array([1]).buffer,
+    };
+  };
+  const downloaded = [];
+  const download = async (opts) => {
+    downloaded.push(opts.filename);
+    return {};
+  };
+  const { sandbox } = loadBackground({ storage, fetch, download, ...instantTimers });
+
+  const res = await sandbox.mineCue({
+    videoId: "abc123abc123",
+    cue: { start: 10, end: 12, text: "これは猫です。" },
+    sentence: { start: 8, end: 14, text: "これは猫です。とても可愛い。" },
+  });
+
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.match(urls[0], /start=7\.800&end=14\.200/);
+  assert.deepEqual(downloaded, ["shisu-ko-mining/shisuko_abc123abc123_10000.mp3"]);
+});
+
+test("mineCue falls back to the cue's own range when no sentence is sent", async () => {
+  const storage = makeMemoryStorage({ settings: { mineTarget: "download" } });
+  const urls = [];
+  const fetch = async (url) => {
+    urls.push(String(url));
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => "audio/mpeg" },
+      arrayBuffer: async () => new Uint8Array([1]).buffer,
+    };
+  };
+  const { sandbox } = loadBackground({ storage, fetch, download: async () => ({}), ...instantTimers });
+
+  await sandbox.mineCue({ videoId: "abc123abc123", cue: { start: 10, end: 12, text: "これは猫です。" } });
+  assert.match(urls[0], /start=9\.800&end=12\.200/);
+});

@@ -12,7 +12,7 @@ const SHISUKO_DEFAULT_SETTINGS = Object.freeze({
   serverUrl: "http://127.0.0.1:8790",
   fontScale: 1.0,
   pauseOnHover: true,
-  lingerSeconds: 3,
+  lingerSeconds: 0.3,
   showTranscript: false,
   hideNativeCaptions: false,
   showStatus: true,

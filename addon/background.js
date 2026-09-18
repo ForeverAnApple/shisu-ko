@@ -150,6 +150,32 @@ function normalizeSentence(text) {
     .replace(/\s+/g, "");
 }
 
+// The spoken sentence the mined cue belongs to, as the content script joined it. An older content
+// script, or a cue the server did not group, mines the cue on its own.
+function sentenceOf(msg) {
+  const cue = (msg && msg.cue) || {};
+  const s = msg && msg.sentence;
+  if (s && typeof s.start === "number" && typeof s.end === "number" && s.end > s.start) {
+    return { start: s.start, end: s.end, text: typeof s.text === "string" && s.text ? s.text : cue.text };
+  }
+  return { start: cue.start, end: cue.end, text: cue.text };
+}
+
+// Yomitan copies the sentence from the one cue it scanned, so the card keeps a fragment of what was
+// said. Give it the whole sentence instead, carrying Yomitan's <b> around the looked-up word across.
+// Returns null when there is nothing to extend: unrelated text, or the sentence is already there.
+function extendSentenceField(existing, full) {
+  const text = String(full || "");
+  const have = normalizeSentence(existing);
+  const want = normalizeSentence(text);
+  if (!have || !want || have.length >= want.length || !want.includes(have)) return null;
+  const bold = (/<b[^>]*>([\s\S]*?)<\/b>/i.exec(String(existing)) || [])[1];
+  const word = normalizeSentence(bold || "");
+  const at = word ? text.indexOf(word) : -1;
+  if (at < 0) return text;
+  return text.slice(0, at) + "<b>" + word + "</b>" + text.slice(at + word.length);
+}
+
 async function ankiPermission(url) {
   if (ankiWatch.permission === "granted") return true;
   const now = Date.now();
@@ -204,7 +230,7 @@ async function storeMedia(url, filename, base64) {
   return typeof stored === "string" && stored ? stored : filename;
 }
 
-async function addToAnki(settings, cue, image, audio, explicitNoteId) {
+async function addToAnki(settings, cue, image, audio, explicitNoteId, fullSentence) {
   const url = normalizeBase(settings.ankiUrl, DEFAULT_SETTINGS.ankiUrl);
   const wanted = Number(explicitNoteId);
   const targetId = Number.isFinite(wanted) && wanted > 0 ? wanted : null;
@@ -224,12 +250,13 @@ async function addToAnki(settings, cue, image, audio, explicitNoteId) {
     }
     const infos = await anki(url, "notesInfo", { notes: [noteId] });
     const fields = (infos && infos[0] && infos[0].fields) || {};
+    const sentence = fullSentence && fullSentence.text ? fullSentence : { text: cue.text };
     if (targetId !== null) {
       // The note was picked by id, not by the viewer: make sure it really is about this subtitle
       // before writing media into it.
       const guardName = String(settings.ankiSentenceField || "").trim() || "Sentence";
       const written = normalizeSentence((fields[guardName] && fields[guardName].value) || "");
-      const spoken = normalizeSentence(cue.text);
+      const spoken = normalizeSentence(sentence.text) || normalizeSentence(cue.text);
       if (written && spoken && !written.includes(spoken) && !spoken.includes(written)) {
         return { ok: false, mismatch: true, error: "The new card's sentence does not match the subtitle; nothing attached" };
       }
@@ -252,16 +279,29 @@ async function addToAnki(settings, cue, image, audio, explicitNoteId) {
         missing.push(settings.ankiAudioField);
       }
     }
+    // Same field the guard above reads: whoever holds the sentence gets the whole sentence.
     const sentenceField = String(settings.ankiSentenceField || "").trim();
-    if (sentenceField && sentenceField in fields) {
-      const existing = ((fields[sentenceField] && fields[sentenceField].value) || "").trim();
-      if (!existing) update[sentenceField] = cue.text;
+    const fieldName = sentenceField || "Sentence";
+    let extended = false;
+    if (fieldName in fields) {
+      const existing = String((fields[fieldName] && fields[fieldName].value) || "").trim();
+      if (!existing) {
+        // Filling an unconfigured field was never this add-on's business; only extending is.
+        if (sentenceField) update[fieldName] = sentence.text;
+      } else {
+        const grown = extendSentenceField(existing, sentence.text);
+        if (grown !== null) {
+          update[fieldName] = grown;
+          extended = true;
+        }
+      }
     }
     if (!Object.keys(update).length) {
       return { ok: false, error: `The ${what} card has none of the fields ${missing.join(", ")}. Check the field names in the popup.` };
     }
     await anki(url, "updateNoteFields", { note: { id: noteId, fields: update } });
     let message = `Added ${Object.keys(update).join(" + ")} to the ${what} Anki card`;
+    if (extended) message += " (sentence extended to what was spoken)";
     if (missing.length) message += ` (no field named ${missing.join(", ")})`;
     return { ok: true, target: "anki", noteId, message };
   } catch (err) {
@@ -306,9 +346,11 @@ async function mineCue(msg) {
   if (!cue || typeof cue.start !== "number" || typeof cue.end !== "number") {
     return { ok: false, error: "No subtitle to mine" };
   }
+  // The clip covers the whole sentence the cue belongs to; the file name still marks the cue.
+  const sentence = sentenceOf(msg);
   const pad = Math.max(0, Number(settings.clipPaddingMs) || 0) / 1000;
-  const start = Math.max(0, cue.start - pad);
-  const end = Math.max(start + 0.3, cue.end + pad);
+  const start = Math.max(0, sentence.start - pad);
+  const end = Math.max(start + 0.3, sentence.end + pad);
   const base = `shisuko_${msg.videoId}_${Math.round(cue.start * 1000)}`;
 
   const image = msg.imageDataUrl && msg.imageDataUrl.includes(",")
@@ -326,7 +368,7 @@ async function mineCue(msg) {
 
   let result;
   if (settings.mineTarget === "anki") {
-    result = await addToAnki(settings, cue, image, audio, msg.noteId);
+    result = await addToAnki(settings, cue, image, audio, msg.noteId, sentence);
     // Automatic mining never writes files: a failure the viewer did not ask for must stay quiet.
     if (!result.ok && !msg.auto && settings.mineFallbackDownload) {
       const fallback = await downloadFiles(image, audio);
