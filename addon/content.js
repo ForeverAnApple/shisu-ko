@@ -194,9 +194,14 @@
     const subBox = document.createElement("div");
     subBox.className = "shisuko-sub shisuko-hidden";
     subBox.setAttribute("lang", "ja");
+    // Yomitan's sentence scan (without "layout-aware scan") walks straight across element
+    // boundaries and would prepend YouTube's time display to the sentence. Invisible full stops
+    // on both sides of the text end the scan at the box edge.
     const subText = document.createElement("span");
     subText.className = "shisuko-subtext";
+    subBox.appendChild(makeSentinel());
     subBox.appendChild(subText);
+    subBox.appendChild(makeSentinel());
     const mineBtn = document.createElement("button");
     mineBtn.type = "button";
     mineBtn.className = "shisuko-mine";
@@ -243,6 +248,14 @@
     state.transcriptDirty = true;
     state.transcriptAppendFrom = null;
     applySettings();
+  }
+
+  function makeSentinel() {
+    const el = document.createElement("span");
+    el.className = "shisuko-sentinel";
+    el.setAttribute("aria-hidden", "true");
+    el.textContent = "\u3002";
+    return el;
   }
 
   function ensureOverlay(player) {

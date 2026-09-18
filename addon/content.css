@@ -62,6 +62,19 @@
   -moz-user-select: text !important;
 }
 
+/* Sentence fences for Yomitan: present in the DOM text, invisible, never selected or copied. */
+.shisuko-sentinel {
+  display: inline-block !important;
+  width: 0 !important;
+  height: 0 !important;
+  font-size: 0 !important;
+  line-height: 0 !important;
+  overflow: hidden !important;
+  color: transparent !important;
+  user-select: none !important;
+  -moz-user-select: none !important;
+}
+
 /* Mine button, floating just outside the right edge of the subtitle box */
 .shisuko-mine {
   position: absolute;
