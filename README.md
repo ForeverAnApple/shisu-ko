@@ -37,8 +37,7 @@ audio from YouTube and the one-time model download.
 
 ## Requirements
 
-- Firefox 140 or newer.
-- Chrome 120 or newer (for the Chrome build).
+- Firefox 140 or newer, or Chrome 120 or newer.
 - For the native server: Python 3.10 or newer on the PATH, plus Node.js 20+ or Deno
   (yt-dlp needs a JavaScript runtime for YouTube). On Nix the flake provides all of this.
 - For the Docker server: Docker with the NVIDIA Container Toolkit (Docker Desktop on Windows
@@ -396,7 +395,10 @@ node --test addon/tests/*.test.js
 
 The browser smoke test uses a local fixture page and does not open a real video. The shared
 development commands are `npm ci`, `npm test`, `npm run build`, `npm run watch`, and
-`npm run test:browser`.
+`npm run test:browser`. Before the first browser test, run `npx playwright install chromium`
+(`npx playwright install --with-deps chromium` on Linux). Set `CHROMIUM_PATH` to use an existing
+Chromium executable instead. The browser test also runs an isolated AnkiConnect fixture; it does
+not change your Anki collection.
 
 The server suite covers window planning, interval merging, cue building and the hallucination
 gates, the preview decode, the live-stream buffer and follower (driven by a fake source and
