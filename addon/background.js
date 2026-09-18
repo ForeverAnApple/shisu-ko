@@ -328,26 +328,55 @@ async function addToAnki(settings, cue, image, audio, explicitNoteId, fullSenten
   }
 }
 
+// Firefox refuses data: URLs in downloads.download ("Access denied for URL data:...", bug
+// 1622986), so the bytes go through a Blob and an object URL created here in the background,
+// which the extension principal owns. The URL is revoked once the download has finished.
+function base64ToBlob(base64, mime) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
+
+const OBJECT_URL_TTL_MS = 120000;
+
+async function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  let release = () => {
+    release = () => {};
+    URL.revokeObjectURL(url);
+  };
+  const timer = setTimeout(() => release(), OBJECT_URL_TTL_MS);
+  try {
+    const id = await browser.downloads.download({ url, filename, conflictAction: "uniquify", saveAs: false });
+    const onChanged = (delta) => {
+      if (delta.id !== id || !delta.state) return;
+      const state = delta.state.current;
+      if (state === "complete" || state === "interrupted") {
+        browser.downloads.onChanged.removeListener(onChanged);
+        clearTimeout(timer);
+        release();
+      }
+    };
+    browser.downloads.onChanged.addListener(onChanged);
+    return id;
+  } catch (err) {
+    clearTimeout(timer);
+    release();
+    throw err;
+  }
+}
+
 async function downloadFiles(image, audio) {
   const jobs = [];
   const names = [];
   if (image) {
     names.push(image.filename);
-    jobs.push(browser.downloads.download({
-      url: "data:image/jpeg;base64," + image.base64,
-      filename: "shisu-ko-mining/" + image.filename,
-      conflictAction: "uniquify",
-      saveAs: false,
-    }));
+    jobs.push(downloadBlob(base64ToBlob(image.base64, "image/jpeg"), "shisu-ko-mining/" + image.filename));
   }
   if (audio) {
     names.push(audio.filename);
-    jobs.push(browser.downloads.download({
-      url: `data:${audio.mime};base64,` + audio.base64,
-      filename: "shisu-ko-mining/" + audio.filename,
-      conflictAction: "uniquify",
-      saveAs: false,
-    }));
+    jobs.push(downloadBlob(base64ToBlob(audio.base64, audio.mime), "shisu-ko-mining/" + audio.filename));
   }
   if (!jobs.length) return { ok: false, error: "Nothing to save" };
   try {

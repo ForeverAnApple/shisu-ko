@@ -647,3 +647,48 @@ test("mineCue falls back to the cue's own range when no sentence is sent", async
   await sandbox.mineCue({ videoId: "abc123abc123", cue: { start: 10, end: 12, text: "これは猫です。" } });
   assert.match(urls[0], /start=9\.800&end=12\.200/);
 });
+
+// ------------------------------------------------------------------ downloads fallback
+
+test("downloadFiles hands Firefox object URLs, never data: URLs", async () => {
+  const seen = [];
+  const revoked = [];
+  const download = async (options) => {
+    seen.push(options);
+    return seen.length;
+  };
+  const { sandbox } = loadBackground({
+    download,
+    createObjectURL: (blob) => `blob:moz-extension://test/${blob.type}`,
+    revokeObjectURL: (url) => revoked.push(url),
+    setTimeout: (fn, ms) => setTimeout(fn, ms).unref(), // the revoke timer must not keep the test runner alive
+  });
+  const image = { base64: Buffer.from("jpeg bytes").toString("base64"), filename: "a.jpg" };
+  const audio = { base64: Buffer.from("mp3 bytes").toString("base64"), filename: "a.mp3", mime: "audio/mpeg" };
+  const res = await sandbox.downloadFiles(image, audio);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.deepEqual(seen.map((o) => o.url), ["blob:moz-extension://test/image/jpeg", "blob:moz-extension://test/audio/mpeg"]);
+  assert.deepEqual(seen.map((o) => o.filename), ["shisu-ko-mining/a.jpg", "shisu-ko-mining/a.mp3"]);
+  assert.ok(seen.every((o) => !o.url.startsWith("data:")));
+  assert.equal(revoked.length, 0, "the object URL must live until the download has finished");
+});
+
+test("downloadFiles revokes the object URL when the download is refused", async () => {
+  const revoked = [];
+  const { sandbox } = loadBackground({
+    download: async () => { throw new Error("Access denied for URL"); },
+    revokeObjectURL: (url) => revoked.push(url),
+    setTimeout: (fn, ms) => setTimeout(fn, ms).unref(),
+  });
+  const res = await sandbox.downloadFiles({ base64: Buffer.from("x").toString("base64"), filename: "a.jpg" }, null);
+  assert.equal(res.ok, false);
+  assert.match(res.error, /Download failed: Access denied/);
+  assert.equal(revoked.length, 1);
+});
+
+test("base64ToBlob decodes the bytes and keeps the mime type", async () => {
+  const { sandbox } = loadBackground();
+  const blob = sandbox.base64ToBlob(Buffer.from([0, 255, 65]).toString("base64"), "audio/mpeg");
+  assert.equal(blob.type, "audio/mpeg");
+  assert.deepEqual([...new Uint8Array(await blob.arrayBuffer())], [0, 255, 65]);
+});

@@ -37,6 +37,7 @@
   const PAUSE_POLL_IDLE_MS = 120000;
   const RESUME_DELAY_MS = 350;
   const TOAST_MS = 3500;
+  const TOAST_MAX_CHARS = 240;
   const MINE_RECENT_WINDOW_S = 6;
   const HOVER_FRAME_MAX_AGE_MS = 60000;
   const HOVER_CAPTURE_DELAY_MS = 400;
@@ -814,7 +815,8 @@
   function showToast(text, kind, ms) {
     const el = state.toastEl;
     if (!el) return;
-    el.textContent = text;
+    // An error can carry a whole URL or payload; a toast that fills the player helps nobody.
+    el.textContent = text.length > TOAST_MAX_CHARS ? text.slice(0, TOAST_MAX_CHARS - 1) + "\u2026" : text;
     let cls = "shisuko-toast";
     if (kind === "error") cls += " shisuko-toast-error";
     else if (kind === "warn") cls += " shisuko-toast-warn";
