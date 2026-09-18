@@ -64,12 +64,29 @@
         addon = pkgs.stdenvNoCC.mkDerivation {
           pname = "shisu-ko-addon";
           version = (builtins.fromJSON (builtins.readFile ./addon/manifest.json)).version;
-          src = ./addon;
-          nativeBuildInputs = [ pkgs.web-ext ];
+          src = ./.;
+          nativeBuildInputs = [ pkgs.nodejs ];
           buildPhase = ''
-            web-ext build --source-dir . --artifacts-dir $out --ignore-files "tests/**"
+            node scripts/build.mjs --browser firefox
           '';
-          dontInstall = true;
+          installPhase = ''
+            mkdir -p $out
+            cp dist/shisu-ko-*-firefox.zip $out/
+          '';
+        };
+
+        addon-chrome = pkgs.stdenvNoCC.mkDerivation {
+          pname = "shisu-ko-addon-chrome";
+          version = (builtins.fromJSON (builtins.readFile ./addon/manifest.json)).version;
+          src = ./.;
+          nativeBuildInputs = [ pkgs.nodejs ];
+          buildPhase = ''
+            node scripts/build.mjs --browser chrome
+          '';
+          installPhase = ''
+            mkdir -p $out
+            cp dist/shisu-ko-*-chrome.zip $out/
+          '';
         };
       };
     in
@@ -84,6 +101,7 @@
           server-cpu = cpu.server;
           python = cuda.python;
           addon = cuda.addon;
+          addon-chrome = cuda.addon-chrome;
         });
 
       apps = forAll (system:
@@ -116,7 +134,7 @@
               echo "shisu-ko dev shell"
               echo "  server:  python server/server.py [--model kotoba-tech/kotoba-whisper-v2.0-faster]"
               echo "  tests:   python -m pytest server/tests && node --test addon/tests/*.test.js"
-              echo "  addon:   web-ext lint --source-dir addon; web-ext build --source-dir addon --artifacts-dir dist --overwrite-dest --ignore-files 'tests/**'"
+              echo "  addon:   node scripts/build.mjs; npx web-ext lint --source-dir addon; npm run test:browser"
             '';
           };
         });
