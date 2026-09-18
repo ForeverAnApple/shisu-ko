@@ -258,6 +258,7 @@ server/
 docker/               Windows wrappers for docker compose and the WSL engine installer
 Dockerfile, compose.yaml, compose.cpu.yaml, .env.example
 sign-addon.cmd        signs the extension through addons.mozilla.org
+AGENTS.md             architecture notes, invariants and gotchas for contributors and coding agents
 ```
 
 ## Development
