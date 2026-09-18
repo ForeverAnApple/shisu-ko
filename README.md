@@ -266,7 +266,7 @@ AGENTS.md             architecture notes, invariants and gotchas for contributor
 ## Development
 
 - Extension: `node --check addon/*.js`, `npx web-ext lint --source-dir addon`,
-  `npx web-ext build --source-dir addon --artifacts-dir dist`.
+  `npx web-ext build --source-dir addon --artifacts-dir dist --ignore-files "tests/**"` (the tests folder is not shipped).
 - Server: `python -W error -c "import ast; ast.parse(open('server/server.py').read())"`,
   `server/run.cmd --check`. The planning and cue-splitting functions are pure and easy to unit
   test by importing `server.py` as a module (register it in `sys.modules` first because of the

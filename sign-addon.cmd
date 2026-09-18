@@ -11,5 +11,5 @@ if "%WEB_EXT_API_KEY%"=="" (
   pause
   exit /b 1
 )
-npx --yes web-ext sign --source-dir addon --artifacts-dir dist --channel unlisted --no-input
+npx --yes web-ext sign --source-dir addon --artifacts-dir dist --channel unlisted --ignore-files "tests/**" --no-input
 pause

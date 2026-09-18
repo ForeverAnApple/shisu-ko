@@ -65,7 +65,7 @@ Extension checks:
 ```
 node --check addon/content.js addon/background.js addon/popup.js
 npx web-ext lint --source-dir addon
-npx web-ext build --source-dir addon --artifacts-dir dist --overwrite-dest
+npx web-ext build --source-dir addon --artifacts-dir dist --overwrite-dest --ignore-files "tests/**"
 ```
 
 Server check: `python -W error -c "import ast; ast.parse(open('server/server.py', encoding='utf-8').read())"`.
@@ -121,6 +121,6 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
 
 ## Release
 
-- `npx web-ext build --source-dir addon --artifacts-dir dist --overwrite-dest` produces the zip.
+- `npx web-ext build --source-dir addon --artifacts-dir dist --overwrite-dest --ignore-files "tests/**"` produces the zip (without the tests folder).
 - `sign-addon.cmd` (repository owner only) produces a signed `.xpi` for regular Firefox.
 - Attach the zip/xpi to a GitHub release; rebuild the Docker image with `docker compose build`.
