@@ -82,6 +82,9 @@ const api = await listen(async (req, res) => {
   }
   return json(res, { error: "not found" }, 404);
 });
+const closedHealth = await listen(() => {});
+await new Promise((resolveClose) => closedHealth.server.close(resolveClose));
+const closedHealthUrl = `http://127.0.0.1:${closedHealth.port}`;
 
 const html = `<!doctype html><html><head><meta charset="utf-8"><style>
 html,body { margin: 0; background: #111; color: white; } #movie_player { position: relative; width: 900px; height: 520px; }
@@ -111,8 +114,11 @@ try {
     const command = commands.find((entry) => entry.name === name);
     assert.equal(command?.shortcut, shortcut, `Chrome command ${name} should register ${shortcut}`);
   }
+  await worker.evaluate((serverUrl) => new Promise((resolve) => chrome.storage.local.set({ settings: { serverUrl } }, resolve)), closedHealthUrl);
   const popup = await context.newPage();
   await popup.goto(`chrome-extension://${extensionId}/popup.html`);
+  await poll(() => popup.locator("#server-status").textContent(), (value) => value === "Server offline");
+  assert.equal(await popup.locator("#serverUrl").inputValue(), closedHealthUrl);
   await popup.locator("details").last().locator("summary").click();
   await popup.locator("#serverUrl").fill(`http://127.0.0.1:${api.port}`);
   await popup.locator("#mineTarget").selectOption("download");
