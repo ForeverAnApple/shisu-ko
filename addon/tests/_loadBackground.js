@@ -61,6 +61,12 @@ function loadBackground(overrides = {}) {
     AbortController,
     Uint8Array,
     btoa,
+    atob: (b64) => Buffer.from(b64, "base64").toString("binary"),
+    Blob,
+    URL: {
+      createObjectURL: overrides.createObjectURL || (() => "blob:moz-extension://test/" + Math.random().toString(16).slice(2)),
+      revokeObjectURL: overrides.revokeObjectURL || (() => {}),
+    },
     fetch: overrides.fetch || (async () => {
       throw new Error("fetch() was not mocked for this test");
     }),
@@ -70,7 +76,8 @@ function loadBackground(overrides = {}) {
         onChanged: { addListener: (fn) => listeners.onChanged.push(fn) },
       },
       downloads: {
-        download: overrides.download || (async () => ({})),
+        download: overrides.download || (async () => 1),
+        onChanged: { addListener: () => {}, removeListener: () => {} },
       },
       runtime: {
         onMessage: { addListener: (fn) => listeners.onMessage.push(fn) },
