@@ -77,7 +77,7 @@ touching the wrong card.
 - No downloads fallback. `mineCue` with `auto: true` never falls back to the Downloads folder: a
   failure the viewer did not ask for must not scatter files.
 
-Polls are throttled to one request per 900 ms (several tabs poll the same background), and the
+Polls are throttled to one request per 250 ms (several tabs poll the same background), and the
 `requestPermission` handshake is retried at most once a minute until Anki grants it. Poll errors
 are logged with `console.debug`, never toasted. The screenshot comes from `state.hoverFrame`,
 captured on `mouseenter` of the subtitle, so the card shows the frame the viewer was reading and
@@ -119,8 +119,10 @@ node --test addon/tests/*.test.js
 `background.js` in a Node `vm` sandbox with `browser`/`fetch`/`btoa` stubbed out — top-level
 `function` declarations become sandbox properties, but `const`/`let` (`DEFAULT_SETTINGS`,
 `REQUEST_TIMEOUT_MS`) need an extra script run in the same context to expose them, since they
-live in the global lexical environment rather than as globalThis properties. When adding a new
-setting or a new pure helper, add a matching test rather than only exercising it manually.
+live in the global lexical environment rather than as globalThis properties. `addon/tests/_loadContent.js` does the same for `content.js` by rewriting its IIFE to return its
+pure helpers (`shouldSync`, `mergeCues`, `findActiveCue`, ...); it throws if the file's shape changes.
+When adding a new setting or a new pure helper, add a matching test rather than only exercising
+it manually.
 
 Load the extension for manual testing via `about:debugging#/runtime/this-firefox` > Load Temporary
 Add-on > `addon/manifest.json`. The content script can also be exercised outside Firefox by

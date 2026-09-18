@@ -27,6 +27,14 @@
   const SYNC_INTERVAL_MS = 1000;
   const RENDER_INTERVAL_MS = 100;
   const DISCOVER_INTERVAL_MS = 750;
+  // Heartbeat while a paused video needs nothing: slow enough to be free, far below the server's
+  // 30 s client timeout (it stops transcribing for a session nobody has synced since then).
+  const SYNC_IDLE_INTERVAL_MS = 5000;
+  // The server's own --lookahead default: it transcribes no further ahead than this, so once the
+  // covered range reaches it there is nothing left to ask for until the playhead moves.
+  const SYNC_LOOKAHEAD_S = 900;
+  // A video paused this long with nobody reading the subtitle is not being mined from.
+  const PAUSE_POLL_IDLE_MS = 120000;
   const RESUME_DELAY_MS = 350;
   const TOAST_MS = 3500;
   const MINE_RECENT_WINDOW_S = 6;
@@ -71,6 +79,7 @@
     transcriptEl: null,
     transcriptList: null,
     cues: [],
+    cueById: new Map(), // id -> cue, so no hot path scans the cue array
     since: 0,
     covered: [],
     duration: 0,
@@ -78,10 +87,12 @@
     serverError: null,
     offline: false,
     serverSession: null,
-    activeCueKey: null,
+    activeCueId: null,
     activeLineEl: null,
     transcriptDirty: true,
     transcriptAppendFrom: null, // index of the first unrendered cue when only appends are pending
+    lineById: new Map(), // cue id -> transcript line element, maintained on append and rebuild
+    transcriptHovered: false,
     hoverPaused: false,
     awaitingPlayerMove: false,
     resumeTimer: null,
@@ -95,6 +106,10 @@
     resizeObserver: null,
     videoListeners: null,
     lastSeekSync: 0,
+    lastSyncAt: 0,
+    pausedSince: 0, // when the video was last paused, 0 while it plays
+    lastHref: null,
+    rediscover: true, // re-query the player and video on the next discover() tick
   };
 
   // ------------------------------------------------------------ helpers
@@ -180,8 +195,7 @@
 
   function cueById(id) {
     if (id === null || id === undefined) return null;
-    const n = Number(id);
-    return state.cues.find((c) => c.id === n) || null;
+    return state.cueById.get(Number(id)) || null;
   }
 
   // ------------------------------------------------------------ settings
@@ -316,6 +330,9 @@
     list.className = "shisuko-transcript-list";
     list.setAttribute("lang", "ja");
     list.addEventListener("click", onTranscriptClick);
+    // The panel does not scroll itself away under the reader's pointer (see highlightTranscript).
+    list.addEventListener("mouseenter", () => { state.transcriptHovered = true; });
+    list.addEventListener("mouseleave", () => { state.transcriptHovered = false; });
     transcriptEl.appendChild(header);
     transcriptEl.appendChild(list);
     root.appendChild(transcriptEl);
@@ -325,10 +342,12 @@
 
     player.appendChild(root);
     Object.assign(state, { root, statusEl, toastEl, subWrap, subBox, subText, mineBtn, transcriptEl, transcriptList: list });
-    state.activeCueKey = null;
+    state.activeCueId = null;
     state.activeLineEl = null;
     state.transcriptDirty = true;
     state.transcriptAppendFrom = null;
+    state.transcriptHovered = false;
+    state.lineById.clear();
     applySettings();
   }
 
@@ -355,14 +374,25 @@
       shutdown();
       return;
     }
-    const player = document.querySelector("#movie_player") || document.querySelector(".html5-video-player");
-    const video = player
-      ? player.querySelector("video.html5-main-video") || player.querySelector("video")
-      : document.querySelector("video.html5-main-video");
+    let player = state.player;
+    let video = state.video;
+    // The elements we hold are good until YouTube replaces them, and a replaced element is
+    // disconnected; searching the whole document every tick only repeats an answer we already have.
+    if (state.rediscover || !player || !player.isConnected || !video || !video.isConnected) {
+      state.rediscover = false;
+      player = document.querySelector("#movie_player") || document.querySelector(".html5-video-player");
+      video = player
+        ? player.querySelector("video.html5-main-video") || player.querySelector("video")
+        : document.querySelector("video.html5-main-video");
+    }
     if (player !== state.player || video !== state.video) attach(player, video);
     else if (player && (!state.root || !state.root.isConnected)) ensureOverlay(player);
-    const id = getVideoIdFromUrl(location.href);
-    if (id !== state.videoId) onVideoChanged(id);
+    const href = location.href;
+    if (href !== state.lastHref) {
+      state.lastHref = href;
+      const id = getVideoIdFromUrl(href);
+      if (id !== state.videoId) onVideoChanged(id);
+    }
   }
 
   function attach(player, video) {
@@ -388,21 +418,29 @@
       const onPlay = () => {
         state.hoverPaused = false;
         state.awaitingPlayerMove = false;
+        state.pausedSince = 0;
         clearResumeTimer();
+        sync(); // playing again: back to the one second cadence at once, not at the next tick
+      };
+      const onPause = () => {
+        if (!state.pausedSince) state.pausedSince = Date.now();
       };
       video.addEventListener("timeupdate", onTime);
       video.addEventListener("seeking", onSeek);
       video.addEventListener("play", onPlay);
-      state.videoListeners = { onTime, onSeek, onPlay };
+      video.addEventListener("pause", onPause);
+      state.videoListeners = { onTime, onSeek, onPlay, onPause };
+      if (video.paused) state.pausedSince = Date.now();
     }
   }
 
   function detach() {
     if (state.video && state.videoListeners) {
-      const { onTime, onSeek, onPlay } = state.videoListeners;
+      const { onTime, onSeek, onPlay, onPause } = state.videoListeners;
       state.video.removeEventListener("timeupdate", onTime);
       state.video.removeEventListener("seeking", onSeek);
       state.video.removeEventListener("play", onPlay);
+      state.video.removeEventListener("pause", onPause);
     }
     state.videoListeners = null;
     if (state.player) state.player.removeEventListener("mousemove", onPlayerMouseMove);
@@ -415,6 +453,7 @@
   function onVideoChanged(id) {
     state.videoId = id;
     state.cues = [];
+    state.cueById.clear();
     state.since = 0;
     state.covered = [];
     state.duration = 0;
@@ -424,9 +463,12 @@
     state.serverSession = null;
     state.transcriptDirty = true;
     state.transcriptAppendFrom = null;
+    state.lineById.clear();
     state.hoverPaused = false;
     state.awaitingPlayerMove = false;
     state.hoverFrame = null;
+    state.lastSyncAt = 0;
+    state.pausedSince = state.video && state.video.paused ? Date.now() : 0;
     clearHoverCapture();
     clearResumeTimer();
     setSubtitle(null);
@@ -437,12 +479,54 @@
 
   // ------------------------------------------------------------ server sync
 
+  // End of the covered range the playhead sits in, or null when this position is not covered.
+  // Pure: the covered list and a time in, a time out.
+  function coveredEnd(covered, t) {
+    if (!Array.isArray(covered)) return null;
+    for (const range of covered) {
+      if (!Array.isArray(range) || range.length < 2) continue;
+      if (t >= range[0] - 0.5 && t <= range[1] + 0.01) return range[1];
+    }
+    return null;
+  }
+
+  // Should the tick actually talk to the server? While the video plays, always: the playhead moves
+  // and cues are wanted. While it is paused, only while the server still has work around the
+  // playhead, plus a slow heartbeat so a restart, an error or a late cue is still noticed — and so
+  // the server does not drop the session for want of a client.
+  // Pure: { paused, t, status, covered, duration, lastSyncAt } and a clock in, a decision out.
+  function shouldSync(st, now) {
+    if (!st.paused) return true;
+    if (now - (st.lastSyncAt || 0) >= SYNC_IDLE_INTERVAL_MS) return true;
+    if (st.status !== "ready") return true; // still fetching, decoding, erroring: keep watching
+    const duration = Number(st.duration) || 0;
+    const target = duration > 0 ? Math.min(duration, st.t + SYNC_LOOKAHEAD_S) : Infinity;
+    const ahead = coveredEnd(st.covered, st.t);
+    return ahead === null || ahead < target - 0.5;
+  }
+
+  function syncTick() {
+    const video = state.video;
+    if (!video) return;
+    pollForNewCard();
+    const decision = {
+      paused: !!video.paused,
+      t: Number(video.currentTime) || 0,
+      status: state.serverStatus,
+      covered: state.covered,
+      duration: state.duration,
+      lastSyncAt: state.lastSyncAt,
+    };
+    if (shouldSync(decision, Date.now())) sync();
+  }
+
   async function sync() {
     const s = state.settings;
     if (!s.enabled || !state.videoId || !state.video || state.syncInFlight) return;
     if (isAdPlaying()) return;
     const videoId = state.videoId;
     state.syncInFlight = true;
+    state.lastSyncAt = Date.now();
     let result;
     try {
       result = await sendMessage({
@@ -492,13 +576,12 @@
     if (typeof data.next === "number") state.since = data.next;
     updateStatus();
     render();
-    if (s.autoMine) pollForNewCard();
   }
 
   function mergeCues(incoming) {
-    const seen = new Set(state.cues.map((c) => c.id));
+    const seen = state.cueById; // already holds every cue: no need to rebuild an id set per response
     const before = state.cues.length;
-    const lastStart = before ? state.cues[before - 1].start : -Infinity;
+    let lastStart = before ? state.cues[before - 1].start : -Infinity;
     let inOrder = true;
     let added = false;
     for (const raw of incoming) {
@@ -514,13 +597,16 @@
         seg: Number.isFinite(seg) ? seg : null,
       };
       if (!cue.text || !Number.isFinite(cue.id) || seen.has(cue.id)) continue;
-      seen.add(cue.id);
+      seen.set(cue.id, cue);
       if (cue.start <= lastStart) inOrder = false;
+      lastStart = cue.start;
       state.cues.push(cue);
       added = true;
     }
     if (added) {
-      state.cues.sort((a, b) => a.start - b.start || a.end - b.end);
+      // Cues normally arrive in order, and then the array is already sorted: sorting thousands of
+      // them again every second would be the one expensive thing on this path.
+      if (!inOrder) state.cues.sort((a, b) => a.start - b.start || a.end - b.end);
       // New cues that all lie after the last rendered one keep the rendered prefix intact (the
       // sort is stable), so the panel can append them; anything else needs a full rebuild.
       const rebuildPending = state.transcriptDirty && state.transcriptAppendFrom === null;
@@ -580,9 +666,9 @@
 
   function setSubtitle(cue) {
     if (!state.subBox) return;
-    const key = cue ? String(cue.id) : null;
-    if (key === state.activeCueKey) return;
-    state.activeCueKey = key;
+    const id = cue ? cue.id : null;
+    if (id === state.activeCueId) return;
+    state.activeCueId = id;
     if (!cue) {
       state.subBox.classList.add("shisuko-hidden");
       state.subText.textContent = "";
@@ -606,11 +692,7 @@
   }
 
   function coveredUntil(t) {
-    for (const range of state.covered) {
-      if (!Array.isArray(range) || range.length < 2) continue;
-      if (t >= range[0] - 0.5 && t <= range[1] + 0.01) return range[1];
-    }
-    return null;
+    return coveredEnd(state.covered, t);
   }
 
   function updateStatus() {
@@ -654,13 +736,14 @@
     if (!s.showStatus && !isError) text = null;
     // Only touch the DOM when something changed: every mutation wakes other extensions'
     // observers (Bitwarden re-walks the whole page after each one).
+    const hidden = el.classList.contains("shisuko-hidden");
     if (!text) {
-      el.classList.add("shisuko-hidden");
+      if (!hidden) el.classList.add("shisuko-hidden");
       return;
     }
     if (el.textContent !== text) el.textContent = text;
     if (el.classList.contains("shisuko-status-error") !== isError) el.classList.toggle("shisuko-status-error", isError);
-    el.classList.remove("shisuko-hidden");
+    if (hidden) el.classList.remove("shisuko-hidden");
   }
 
   function showToast(text, kind, ms) {
@@ -698,6 +781,7 @@
     line.appendChild(time);
     line.appendChild(text);
     line.appendChild(mine);
+    state.lineById.set(cue.id, line);
     return line;
   }
 
@@ -707,13 +791,15 @@
     state.transcriptDirty = false;
     const from = state.transcriptAppendFrom;
     state.transcriptAppendFrom = null;
-    const rendered = list.querySelectorAll(".shisuko-line").length;
+    // The map counts the lines already in the panel, so nothing walks the DOM to find out.
+    const rendered = state.lineById.size;
     const frag = document.createDocumentFragment();
     if (from !== null && from > 0 && from === rendered && from <= state.cues.length) {
       // Only cues after the rendered ones arrived: append them instead of rebuilding thousands of nodes.
       for (let i = from; i < state.cues.length; i++) frag.appendChild(transcriptLine(state.cues[i]));
       list.appendChild(frag);
     } else {
+      state.lineById.clear();
       for (const cue of state.cues) frag.appendChild(transcriptLine(cue));
       if (!state.cues.length) {
         const empty = document.createElement("div");
@@ -724,7 +810,7 @@
       list.replaceChildren(frag);
       state.activeLineEl = null;
     }
-    if (state.activeCueKey) highlightTranscript(cueById(state.activeCueKey));
+    if (state.activeCueId !== null) highlightTranscript(cueById(state.activeCueId));
   }
 
   function highlightTranscript(cue) {
@@ -733,11 +819,13 @@
     if (state.activeLineEl) state.activeLineEl.classList.remove("shisuko-active");
     state.activeLineEl = null;
     if (!cue) return;
-    const line = list.querySelector(`.shisuko-line[data-id="${cue.id}"]`);
+    const line = state.lineById.get(cue.id);
     if (!line) return;
     line.classList.add("shisuko-active");
     state.activeLineEl = line;
-    if (!list.matches(":hover")) {
+    // matches(":hover") would flush style on every cue change; the two listeners on the list keep
+    // the same answer for free. offsetTop below forces layout, so it stays behind this guard.
+    if (!state.transcriptHovered) {
       list.scrollTop = line.offsetTop - list.clientHeight / 2 + line.offsetHeight / 2;
     }
   }
@@ -748,7 +836,7 @@
       ev.preventDefault();
       const line = mineButton.closest(".shisuko-line");
       const cue = cueById(line && line.dataset.id);
-      if (cue) mineCue(cue, { seekForFrame: String(cue.id) !== state.activeCueKey });
+      if (cue) mineCue(cue, { seekForFrame: cue.id !== state.activeCueId });
       return;
     }
     const time = ev.target.closest(".shisuko-time");
@@ -763,8 +851,8 @@
   // ------------------------------------------------------------ sentence mining
 
   function currentCueForMining() {
-    if (state.activeCueKey) {
-      const active = cueById(state.activeCueKey);
+    if (state.activeCueId !== null) {
+      const active = cueById(state.activeCueId);
       if (active) return active;
     }
     const t = state.video ? Number(state.video.currentTime) || 0 : 0;
@@ -814,13 +902,13 @@
     // video frame back from the GPU stalls the main thread, so wait until Yomitan's scan has run
     // and encode off the main thread. With hover-pause on, the frame is the same anyway.
     clearHoverCapture();
-    const key = state.activeCueKey;
-    if (!key || !state.video || (state.hoverFrame && state.hoverFrame.cueId === key)) return;
+    const id = state.activeCueId;
+    if (id === null || !state.video || (state.hoverFrame && state.hoverFrame.cueId === id)) return;
     state.hoverCaptureTimer = setTimeout(() => {
       state.hoverCaptureTimer = null;
-      if (state.activeCueKey !== key || !state.video) return;
+      if (state.activeCueId !== id || !state.video) return;
       captureFrameAsync(state.video).then((dataUrl) => {
-        if (dataUrl && state.activeCueKey === key) state.hoverFrame = { cueId: key, dataUrl, at: Date.now() };
+        if (dataUrl && state.activeCueId === id) state.hoverFrame = { cueId: id, dataUrl, at: Date.now() };
       });
     }, HOVER_CAPTURE_DELAY_MS);
   }
@@ -888,7 +976,7 @@
         await seekTo(video, Math.min(cue.end, cue.start + 0.4));
       }
       const hover = state.hoverFrame;
-      const useHover = opts.auto && hover && hover.cueId === String(cue.id) && Date.now() - hover.at < HOVER_FRAME_MAX_AGE_MS;
+      const useHover = opts.auto && hover && hover.cueId === cue.id && Date.now() - hover.at < HOVER_FRAME_MAX_AGE_MS;
       const imageDataUrl = useHover ? hover.dataUrl : captureFrame(video);
       if (restore) {
         await seekTo(video, restore.t);
@@ -925,11 +1013,23 @@
     video.play().catch(() => {});
   }
 
-  // Ask the background whether Yomitan just created a card. Riding on the sync loop keeps the
-  // polling to tabs that have a video open and are being watched.
+  // Is anyone plausibly mining right now? Polling costs a message and an AnkiConnect request per
+  // second, so it is spent only where a card can appear: a visible tab, playing, or paused with the
+  // viewer at the subtitle. A video left paused in a visible tab for two minutes is not being read.
+  function ankiPollAllowed() {
+    const s = state.settings;
+    if (!s.enabled || !s.autoMine || state.offline) return false;
+    // Nothing transcribed yet means nothing a new card could be given.
+    if (!state.videoId || !state.cues.length) return false;
+    if (document.visibilityState !== "visible" || isAdPlaying()) return false;
+    if (state.hoverPaused || state.awaitingPlayerMove) return true;
+    return !state.pausedSince || Date.now() - state.pausedSince < PAUSE_POLL_IDLE_MS;
+  }
+
+  // Ask the background whether Yomitan just created a card.
   async function pollForNewCard() {
     if (state.mining || state.ankiPollInFlight) return;
-    if (document.visibilityState !== "visible" || isAdPlaying()) return;
+    if (!ankiPollAllowed()) return;
     state.ankiPollInFlight = true;
     let res;
     try {
@@ -995,7 +1095,9 @@
   }
 
   function onPlayerMouseMove(ev) {
-    state.lastPointer = { x: ev.clientX, y: ev.clientY };
+    // Mutated, not replaced: this runs on every mouse move across the player.
+    state.lastPointer.x = ev.clientX;
+    state.lastPointer.y = ev.clientY;
     if (!state.hoverPaused || !state.awaitingPlayerMove) return;
     if (state.subBox && state.subBox.contains(ev.target)) return;
     if (!isYouTubeElement(ev.target)) return;
@@ -1041,12 +1143,16 @@
   loadSettings().then(() => {
     discover();
     timers.push(setInterval(discover, DISCOVER_INTERVAL_MS));
-    timers.push(setInterval(sync, SYNC_INTERVAL_MS));
+    timers.push(setInterval(syncTick, SYNC_INTERVAL_MS));
     timers.push(setInterval(render, RENDER_INTERVAL_MS));
     timers.push(setInterval(() => {
-      if (state.settings.autoMine && !state.offline && (state.hoverPaused || state.awaitingPlayerMove)) pollForNewCard();
+      if (state.hoverPaused || state.awaitingPlayerMove) pollForNewCard();
     }, HOVER_POLL_INTERVAL_MS));
-    document.addEventListener("yt-navigate-finish", () => setTimeout(discover, 50));
+    document.addEventListener("yt-navigate-finish", () => {
+      // YouTube swaps the player on navigation: the cached element must be looked up again.
+      state.rediscover = true;
+      setTimeout(discover, 50);
+    });
     document.addEventListener("fullscreenchange", () => setTimeout(updateFontSize, 100));
   });
 })();

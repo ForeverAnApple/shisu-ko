@@ -25,17 +25,35 @@ const ankiWatch = { baseline: null, lastPollAt: 0, lastOk: false, permission: nu
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Every message from a content script used to re-read storage; at one sync tick and one Anki poll
+// per second per tab that is two cross-process reads a second for a value that changes when the
+// viewer touches the popup. The listener below is registered at the top level so the event page
+// wakes up for a change it made while suspended.
+let settingsCache = null;
+
+// Frozen because every caller now shares one object: a stray write would change what the next
+// caller reads, and a throw here is cheaper to find than that.
+function cacheSettings(settings) {
+  settingsCache = Object.freeze(settings);
+  return settingsCache;
+}
+
 async function getSettings() {
+  if (settingsCache) return settingsCache;
   const stored = await browser.storage.local.get("settings");
-  return Object.assign({}, DEFAULT_SETTINGS, stored.settings || {});
+  return cacheSettings(Object.assign({}, DEFAULT_SETTINGS, stored.settings || {}));
 }
 
 async function saveSettings(patch) {
   const current = await getSettings();
   const next = Object.assign({}, current, patch || {});
   await browser.storage.local.set({ settings: next });
-  return next;
+  return cacheSettings(next);
 }
+
+browser.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes && changes.settings) settingsCache = null;
+});
 
 function normalizeBase(url, fallback) {
   const value = String(url || fallback).trim().replace(/\/+$/, "");

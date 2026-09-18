@@ -63,6 +63,53 @@ test("saveSettings patches on top of the current settings and persists them", as
   assert.equal(again.serverUrl, sandbox.DEFAULT_SETTINGS.serverUrl);
 });
 
+test("getSettings reads storage once and serves the rest from memory", async () => {
+  let gets = 0;
+  const base = makeMemoryStorage({ settings: { fontScale: 1.5 } });
+  const storage = { get: (key) => (gets++, base.get(key)), set: (patch) => base.set(patch) };
+  const { sandbox } = loadBackground({ storage });
+  for (let i = 0; i < 20; i++) await sandbox.getSettings();
+  assert.equal(gets, 1);
+  assert.equal((await sandbox.getSettings()).fontScale, 1.5);
+});
+
+test("a settings change in storage drops the cache", async () => {
+  let gets = 0;
+  const base = makeMemoryStorage({ settings: { fontScale: 1.5 } });
+  const storage = { get: (key) => (gets++, base.get(key)), set: (patch) => base.set(patch) };
+  const { sandbox, listeners } = loadBackground({ storage });
+  assert.equal((await sandbox.getSettings()).fontScale, 1.5);
+  assert.equal(gets, 1);
+  // What the popup does: write the new value, then let storage.onChanged tell everyone.
+  await base.set({ settings: { fontScale: 3 } });
+  for (const fn of listeners.onChanged) fn({ settings: { newValue: { fontScale: 3 } } }, "local");
+  assert.equal((await sandbox.getSettings()).fontScale, 3);
+  assert.equal(gets, 2);
+});
+
+test("a change to something other than the settings leaves the cache alone", async () => {
+  let gets = 0;
+  const base = makeMemoryStorage({ settings: { fontScale: 1.5 } });
+  const storage = { get: (key) => (gets++, base.get(key)), set: (patch) => base.set(patch) };
+  const { sandbox, listeners } = loadBackground({ storage });
+  await sandbox.getSettings();
+  for (const fn of listeners.onChanged) fn({ somethingElse: { newValue: 1 } }, "local");
+  for (const fn of listeners.onChanged) fn({ settings: { newValue: {} } }, "sync"); // another area
+  await sandbox.getSettings();
+  assert.equal(gets, 1);
+});
+
+test("saveSettings makes the new value readable without another storage read", async () => {
+  let gets = 0;
+  const base = makeMemoryStorage();
+  const storage = { get: (key) => (gets++, base.get(key)), set: (patch) => base.set(patch) };
+  const { sandbox } = loadBackground({ storage });
+  await sandbox.saveSettings({ fontScale: 2 });
+  const getsAfterSave = gets;
+  assert.equal((await sandbox.getSettings()).fontScale, 2);
+  assert.equal(gets, getsAfterSave);
+});
+
 // ------------------------------------------------------------------ apiRequest
 
 test("apiRequest rejects paths that do not start with /", async () => {
