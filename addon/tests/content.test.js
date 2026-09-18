@@ -191,3 +191,18 @@ test("ankiPollAllowed stays quiet with nothing to attach or the feature off", ()
   api.state.offline = true;
   assert.equal(api.ankiPollAllowed(), false);
 });
+
+test("sentenceForCue joins the cues of a segment but stops at a long pause", () => {
+  const { api } = loadContent();
+  const sentenceForCue = api.sentenceForCue;
+  const cues = [
+    { id: 0, seg: 7, start: 0, end: 1, text: "あ" },
+    { id: 1, seg: 7, start: 1.2, end: 2, text: "い" },
+    { id: 2, seg: 7, start: 15, end: 16, text: "う" }, // 13 s of music in between
+    { id: 3, seg: 8, start: 16.1, end: 17, text: "え" },
+  ];
+  const plain = (v) => JSON.parse(JSON.stringify(v)); // vm realm objects differ by prototype
+  assert.deepEqual(plain(sentenceForCue(cues, cues[1])), { start: 0, end: 2, text: "あい" });
+  assert.deepEqual(plain(sentenceForCue(cues, cues[2])), { start: 15, end: 16, text: "う" });
+  assert.deepEqual(plain(sentenceForCue(cues, cues[3])), { start: 16.1, end: 17, text: "え" });
+});

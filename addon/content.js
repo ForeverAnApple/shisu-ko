@@ -41,7 +41,8 @@
   const HOVER_FRAME_MAX_AGE_MS = 60000;
   const HOVER_CAPTURE_DELAY_MS = 400;
   const ANKI_POLL_LOG_MS = 60000;
-  const HOVER_POLL_INTERVAL_MS = 300; // a card is most likely to appear while a subtitle is hovered
+  const HOVER_POLL_INTERVAL_MS = 300;
+  const SENTENCE_MAX_GAP_S = 1.5; // cues of one segment further apart than this are not one sentence // a card is most likely to appear while a subtitle is hovered
   // A blank shorter than this reads as a flicker rather than a pause, so the text is held instead.
   const MIN_BLANK_S = 0.3;
   // Left this far into a line replays it instead of stepping back to the one before.
@@ -934,9 +935,20 @@
     if (!cue) return null;
     const own = { start: cue.start, end: cue.end, text: cue.text };
     if (!Number.isFinite(cue.seg)) return own;
-    const parts = cues.filter((c) => c && c.seg === cue.seg);
+    const all = cues.filter((c) => c && c.seg === cue.seg);
+    if (all.length < 2) return own;
+    all.sort((a, b) => a.start - b.start || a.end - b.end);
+    // A segment can span a long pause (music, a cut); only the run of cues around this one that
+    // sits within SENTENCE_MAX_GAP_S of its neighbours is the sentence.
+    let i = all.indexOf(cue);
+    if (i < 0) i = all.findIndex((c) => c.id === cue.id);
+    if (i < 0) return own;
+    let lo = i;
+    while (lo > 0 && all[lo].start - all[lo - 1].end <= SENTENCE_MAX_GAP_S) lo--;
+    let hi = i;
+    while (hi < all.length - 1 && all[hi + 1].start - all[hi].end <= SENTENCE_MAX_GAP_S) hi++;
+    const parts = all.slice(lo, hi + 1);
     if (parts.length < 2) return own;
-    parts.sort((a, b) => a.start - b.start || a.end - b.end);
     return {
       start: Math.min(...parts.map((c) => c.start)),
       end: Math.max(...parts.map((c) => c.end)),
