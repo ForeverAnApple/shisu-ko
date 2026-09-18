@@ -1,0 +1,258 @@
+/* Overlay container: covers the player, lets clicks pass through except on our boxes. */
+.shisuko-root {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 60;
+  font-family: "Noto Sans JP", "Noto Sans CJK JP", "Yu Gothic UI", "Yu Gothic", "Meiryo", "Hiragino Sans", sans-serif;
+  color: #fff;
+}
+
+.shisuko-hidden {
+  display: none !important;
+}
+
+/* Subtitle */
+.shisuko-subwrap {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 11%;
+  display: flex;
+  justify-content: center;
+  padding: 0 4%;
+  transition: bottom 0.2s ease;
+}
+
+.html5-video-player.ytp-autohide .shisuko-subwrap {
+  bottom: 4%;
+}
+
+/* Keep the subtitle clear of the transcript panel while it is open. */
+.shisuko-root.shisuko-has-transcript .shisuko-subwrap {
+  right: calc(min(34%, 380px) + 16px);
+}
+
+.shisuko-sub {
+  position: relative;
+  pointer-events: auto;
+  user-select: text !important;
+  -moz-user-select: text !important;
+  cursor: default;
+  max-width: 92%;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  padding: 0.22em 0.6em 0.28em;
+  border-radius: 0.3em;
+  line-height: 1.35;
+  text-align: center;
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.9);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  letter-spacing: 0.01em;
+  transition: background 0.15s ease;
+}
+
+.shisuko-sub:hover {
+  background: rgba(0, 0, 0, 0.9);
+}
+
+.shisuko-subtext {
+  user-select: text !important;
+  -moz-user-select: text !important;
+}
+
+/* Mine button, floating just outside the right edge of the subtitle box */
+.shisuko-mine {
+  position: absolute;
+  right: -1.7em;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 1.5em;
+  height: 1.5em;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.75);
+  color: #ffd600;
+  font-size: 0.75em;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease;
+  pointer-events: auto;
+  user-select: none;
+}
+
+.shisuko-sub:hover .shisuko-mine,
+.shisuko-mine:focus-visible {
+  opacity: 1;
+}
+
+.shisuko-mine:hover {
+  background: rgba(255, 214, 0, 0.95);
+  color: #000;
+}
+
+/* Status badge (top left) and toast (top centre) */
+.shisuko-status {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  pointer-events: none;
+  background: rgba(0, 0, 0, 0.6);
+  color: #ddd;
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 3px 8px;
+  border-radius: 4px;
+  max-width: 60%;
+}
+
+.shisuko-status-error {
+  background: rgba(150, 0, 0, 0.8);
+  color: #fff;
+}
+
+.shisuko-toast {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: none;
+  background: rgba(20, 20, 20, 0.9);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 6px 12px;
+  border-radius: 6px;
+  max-width: 70%;
+  text-align: center;
+}
+
+.shisuko-toast-ok {
+  background: rgba(20, 110, 50, 0.92);
+}
+
+.shisuko-toast-warn {
+  background: rgba(150, 100, 0, 0.92);
+}
+
+.shisuko-toast-error {
+  background: rgba(150, 0, 0, 0.92);
+}
+
+/* Transcript panel */
+.shisuko-transcript {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  bottom: 12%;
+  width: min(34%, 380px);
+  pointer-events: auto;
+  background: rgba(0, 0, 0, 0.8);
+  color: #eee;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  font-size: 14px;
+  overflow: hidden;
+}
+
+.shisuko-transcript-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 6px 6px 10px;
+  font-size: 0.9em;
+  color: #bbb;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  flex: 0 0 auto;
+}
+
+.shisuko-transcript-close {
+  background: transparent;
+  border: 0;
+  color: #bbb;
+  font-size: 1.3em;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 6px;
+}
+
+.shisuko-transcript-close:hover {
+  color: #fff;
+}
+
+.shisuko-transcript-list {
+  position: relative;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  padding: 6px;
+  user-select: text !important;
+  -moz-user-select: text !important;
+  scrollbar-width: thin;
+}
+
+.shisuko-line {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 4px 6px;
+  border-radius: 4px;
+  line-height: 1.4;
+}
+
+.shisuko-line:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.shisuko-line.shisuko-active {
+  background: rgba(255, 214, 0, 0.2);
+}
+
+.shisuko-time {
+  color: #9ad0ff;
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  user-select: none;
+}
+
+.shisuko-time:hover {
+  text-decoration: underline;
+}
+
+.shisuko-linetext {
+  flex: 1 1 auto;
+  user-select: text !important;
+  -moz-user-select: text !important;
+}
+
+.shisuko-line-mine {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: #ffd600;
+  cursor: pointer;
+  font-size: 1em;
+  line-height: 1.4;
+  padding: 0 2px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.shisuko-line:hover .shisuko-line-mine,
+.shisuko-line-mine:focus-visible {
+  opacity: 1;
+}
+
+.shisuko-empty {
+  color: #888;
+  padding: 8px;
+}
+
+/* Optional: hide YouTube's own caption renderer */
+html.shisuko-hide-native .ytp-caption-window-container {
+  display: none !important;
+}

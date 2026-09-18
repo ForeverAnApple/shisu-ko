@@ -1,0 +1,18 @@
+# CPU-only variant for machines without an NVIDIA GPU or without the container toolkit.
+# large-v3 is far too slow on CPU; "small" or "base" keeps up with playback on a modern CPU.
+#
+#   docker compose -f compose.cpu.yaml up -d
+
+services:
+  shisu-ko:
+    build: .
+    image: shisu-ko-server:latest
+    container_name: shisu-ko
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8790:8790"
+    volumes:
+      - ${DATA_DIR:-./data}:/data
+    environment:
+      - SHISUKO_HOME=/data
+    command: ["--model", "${WHISPER_MODEL:-small}", "--device", "cpu", "--compute-type", "int8", "--cpu-threads", "${CPU_THREADS:-8}", "--log-level", "INFO"]

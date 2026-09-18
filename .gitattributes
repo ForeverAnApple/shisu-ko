@@ -1,0 +1,7 @@
+# Consistent line endings: LF everywhere, CRLF only for Windows batch files
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.zip binary
+*.xpi binary
+*.png binary

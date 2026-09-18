@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# One-time setup for Linux/macOS: isolated Python environment under ~/.shisu-ko
+set -euo pipefail
+ROOT="${HOME}/.shisu-ko"
+VENV="${ROOT}/venv"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+
+command -v python3 >/dev/null 2>&1 || { echo "python3 (3.10+) is required"; exit 1; }
+mkdir -p "${ROOT}/cache" "${ROOT}/models"
+[ -x "${VENV}/bin/python" ] || python3 -m venv "${VENV}"
+"${VENV}/bin/python" -m pip install --upgrade pip
+"${VENV}/bin/python" -m pip install -r "${HERE}/requirements.txt"
+if command -v nvidia-smi >/dev/null 2>&1; then
+  "${VENV}/bin/python" -m pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+fi
+"${VENV}/bin/python" "${HERE}/server.py" --check
+echo "Setup finished. Start the server with ./run.sh"

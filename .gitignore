@@ -1,0 +1,18 @@
+# machine-specific compose settings
+.env
+
+# build artifacts and local data
+dist/
+data/
+web-ext-artifacts/
+node_modules/
+
+# python
+__pycache__/
+*.pyc
+
+# editors / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

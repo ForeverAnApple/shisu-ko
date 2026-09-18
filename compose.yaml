@@ -1,0 +1,30 @@
+# GPU setup (NVIDIA). Requires Docker with the NVIDIA Container Toolkit
+# (Docker Desktop on Windows with the WSL 2 backend has it built in).
+#
+#   docker compose up -d        start in the background (auto-restarts after crashes)
+#   docker compose logs -f      watch transcription progress
+#   docker compose down         stop
+#
+# Settings come from .env (copy .env.example). DATA_DIR should point at the same folder the
+# native setup uses (~/.shisu-ko) so the downloaded model and cached cues are shared.
+
+services:
+  shisu-ko:
+    build: .
+    image: shisu-ko-server:latest
+    container_name: shisu-ko
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8790:8790"
+    volumes:
+      - ${DATA_DIR:-./data}:/data
+    environment:
+      - SHISUKO_HOME=/data
+    command: ["--model", "${WHISPER_MODEL:-large-v3}", "--lookahead", "${LOOKAHEAD:-900}", "--log-level", "INFO"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

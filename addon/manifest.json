@@ -1,0 +1,78 @@
+{
+  "manifest_version": 3,
+  "name": "Shisu-ko",
+  "version": "0.2.0",
+  "description": "Live Japanese subtitles for YouTube from a local Whisper server, scannable with Yomitan, with one-key screenshot and audio mining into Anki.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "shisu-ko@multysquid.github.io",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
+    }
+  },
+  "permissions": [
+    "storage",
+    "downloads"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ]
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://www.youtube.com/*",
+        "*://m.youtube.com/*",
+        "*://youtube.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Shisu-ko",
+    "default_icon": {
+      "48": "icons/icon.svg",
+      "96": "icons/icon.svg"
+    }
+  },
+  "icons": {
+    "48": "icons/icon.svg",
+    "96": "icons/icon.svg"
+  },
+  "commands": {
+    "toggle-subtitles": {
+      "suggested_key": {
+        "default": "Alt+Shift+S"
+      },
+      "description": "Toggle Shisu-ko subtitles"
+    },
+    "toggle-transcript": {
+      "suggested_key": {
+        "default": "Alt+Shift+T"
+      },
+      "description": "Toggle the transcript panel"
+    },
+    "mine-current": {
+      "suggested_key": {
+        "default": "Alt+Shift+M"
+      },
+      "description": "Mine the current subtitle: screenshot and audio clip to Anki or Downloads"
+    }
+  }
+}
