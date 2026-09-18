@@ -62,15 +62,20 @@
   -moz-user-select: text !important;
 }
 
-/* Sentence fences for Yomitan: present in the DOM text, invisible, never selected or copied. */
+/* Sentence fences for Yomitan. Yomitan skips elements it considers invisible (font-size 0,
+   opacity 0, transparent text), so the fence must stay "visible" to it and be clipped instead:
+   zero-size, overflow hidden, out of flow. white-space: pre keeps the newline in the DOM text. */
 .shisuko-sentinel {
+  position: absolute !important;
   display: inline-block !important;
   width: 0 !important;
   height: 0 !important;
-  font-size: 0 !important;
-  line-height: 0 !important;
   overflow: hidden !important;
-  color: transparent !important;
+  font-size: 1px !important;
+  line-height: 0 !important;
+  white-space: pre !important;
+  color: inherit !important;
+  opacity: 1 !important;
   user-select: none !important;
   -moz-user-select: none !important;
 }

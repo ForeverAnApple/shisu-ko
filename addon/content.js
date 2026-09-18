@@ -226,9 +226,9 @@
     // on both sides of the text end the scan at the box edge.
     const subText = document.createElement("span");
     subText.className = "shisuko-subtext";
-    subBox.appendChild(makeSentinel());
+    subBox.appendChild(makeSentinel("\u3002\n"));
     subBox.appendChild(subText);
-    subBox.appendChild(makeSentinel());
+    subBox.appendChild(makeSentinel("\n\u3002"));
     const mineBtn = document.createElement("button");
     mineBtn.type = "button";
     mineBtn.className = "shisuko-mine";
@@ -277,11 +277,13 @@
     applySettings();
   }
 
-  function makeSentinel() {
+  function makeSentinel(text) {
+    // A newline ends Yomitan's sentence in its default mode; the full stop covers the mode
+    // where newlines are ignored. The span is clipped to nothing by content.css.
     const el = document.createElement("span");
     el.className = "shisuko-sentinel";
     el.setAttribute("aria-hidden", "true");
-    el.textContent = "\u3002";
+    el.textContent = text;
     return el;
   }
 
