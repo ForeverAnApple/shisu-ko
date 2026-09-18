@@ -5,13 +5,23 @@
  *  1. Proxy API calls from content scripts to the local Whisper server.
  *  2. Own the settings object in browser.storage.local.
  *  3. Sentence mining: fetch the audio clip for a cue from the server and attach it, together
- *     with the screenshot taken by the content script, to the newest Anki card via AnkiConnect,
- *     or save both to the Downloads folder.
+ *     with the screenshot taken by the content script, to an Anki card via AnkiConnect, or save
+ *     both to the Downloads folder.
+ *  4. Watch AnkiConnect for a note Yomitan has just added, so the content script can attach the
+ *     material without the viewer pressing anything.
  */
 
 const DEFAULT_SETTINGS = SHISUKO_DEFAULT_SETTINGS; // from settings.js
 
 const REQUEST_TIMEOUT_MS = 10000;
+
+// Auto-mining watcher: poll AnkiConnect for a note Yomitan has just created.
+const ANKI_POLL_THROTTLE_MS = 250;   // several tabs may poll; one request per interval is enough
+const ANKI_PERMISSION_RECHECK_MS = 60000;
+const ANKI_POLL_TIMEOUT_MS = 5000;      // a hung poll would otherwise block the watcher for good
+const ANKI_BASELINE_MAX_AGE_MS = 10000; // a gap this long means the baseline can no longer be trusted
+
+const ankiWatch = { baseline: null, lastPollAt: 0, lastOk: false, permission: null, permissionCheckedAt: 0 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -111,43 +121,133 @@ async function fetchClip(settings, videoId, start, end) {
   return { ok: false, error: "The server is still fetching this video's audio, try again in a moment" };
 }
 
-async function anki(url, action, params) {
+async function anki(url, action, params, timeoutMs) {
   // No Content-Type header on purpose: a "simple" request needs no CORS preflight, which
   // matters for the very first requestPermission call from a not-yet-allowed origin.
-  const res = await fetch(url, { method: "POST", body: JSON.stringify({ action, version: 6, params: params || {} }) });
-  const data = await res.json();
-  if (data && data.error) throw new Error(data.error);
-  return data ? data.result : null;
+  // requestPermission blocks until the viewer answers Anki's dialog, so it gets no timeout.
+  const controller = new AbortController();
+  const timer = timeoutMs ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      body: JSON.stringify({ action, version: 6, params: params || {} }),
+      signal: controller.signal,
+    });
+    const data = await res.json();
+    if (data && data.error) throw new Error(data.error);
+    return data ? data.result : null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
-async function addToAnki(settings, cue, image, audio) {
+// Strip markup and whitespace so two spellings of the same sentence compare equal: Yomitan wraps
+// the looked-up word in <b> and may use &nbsp;, and Whisper's spacing need not match.
+function normalizeSentence(text) {
+  return String(text === undefined || text === null ? "" : text)
+    .replace(/<[^>]*>/g, "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/\s+/g, "");
+}
+
+async function ankiPermission(url) {
+  if (ankiWatch.permission === "granted") return true;
+  const now = Date.now();
+  if (ankiWatch.permissionCheckedAt && now - ankiWatch.permissionCheckedAt < ANKI_PERMISSION_RECHECK_MS) return false;
+  ankiWatch.permissionCheckedAt = now;
+  const perm = await anki(url, "requestPermission", {});
+  ankiWatch.permission = (perm && perm.permission) || "denied";
+  return ankiWatch.permission === "granted";
+}
+
+// Report a note that appeared since the previous poll. Reports nothing whenever the baseline could
+// be stale (first poll, previous poll failed, long gap) or when several notes arrived at once, so a
+// card added while Anki was closed, or an import, is never touched.
+async function ankiPoll() {
+  const settings = await getSettings();
+  if (!settings.autoMine || settings.mineTarget !== "anki") return { ok: true, newNoteId: null };
+  const now = Date.now();
+  const previousPollAt = ankiWatch.lastPollAt;
+  if (now - previousPollAt < ANKI_POLL_THROTTLE_MS) return { ok: true, newNoteId: null };
+  ankiWatch.lastPollAt = now;
   const url = normalizeBase(settings.ankiUrl, DEFAULT_SETTINGS.ankiUrl);
+  try {
+    if (!(await ankiPermission(url))) {
+      ankiWatch.lastOk = false;
+      return { ok: false, error: "AnkiConnect denied access. Click Yes in Anki's permission dialog." };
+    }
+    const ids = await anki(url, "findNotes", { query: "added:1" }, ANKI_POLL_TIMEOUT_MS);
+    const list = (Array.isArray(ids) ? ids : []).map(Number).filter(Number.isFinite);
+    const maxId = list.length ? Math.max(...list) : 0;
+    const baseline = ankiWatch.baseline;
+    const stale = baseline === null || !ankiWatch.lastOk || now - previousPollAt > ANKI_BASELINE_MAX_AGE_MS;
+    ankiWatch.lastOk = true;
+    if (stale || maxId > baseline) ankiWatch.baseline = maxId;
+    if (stale || maxId <= baseline) return { ok: true, newNoteId: null };
+    const added = list.filter((id) => id > baseline);
+    return { ok: true, newNoteId: added.length === 1 ? maxId : null };
+  } catch (err) {
+    ankiWatch.lastOk = false;
+    const network = err && err.name === "TypeError";
+    return {
+      ok: false,
+      offline: true,
+      error: network ? "Anki is not running or AnkiConnect is not installed" : String((err && err.message) || err),
+    };
+  }
+}
+
+// Anki may rename an uploaded file (recent versions lowercase it, and clashes get a suffix), so the
+// field must reference the name storeMediaFile reports, not the one we asked for.
+async function storeMedia(url, filename, base64) {
+  const stored = await anki(url, "storeMediaFile", { filename, data: base64 });
+  return typeof stored === "string" && stored ? stored : filename;
+}
+
+async function addToAnki(settings, cue, image, audio, explicitNoteId) {
+  const url = normalizeBase(settings.ankiUrl, DEFAULT_SETTINGS.ankiUrl);
+  const wanted = Number(explicitNoteId);
+  const targetId = Number.isFinite(wanted) && wanted > 0 ? wanted : null;
+  const what = targetId === null ? "newest" : "new";
   try {
     const perm = await anki(url, "requestPermission", {});
     if (!perm || perm.permission !== "granted") {
       return { ok: false, error: "AnkiConnect denied access. Click Yes in Anki's permission dialog, then mine again." };
     }
-    const ids = await anki(url, "findNotes", { query: "added:1" });
-    if (!Array.isArray(ids) || !ids.length) {
-      return { ok: false, error: "No card was added today. Create the card with Yomitan first, then mine." };
+    let noteId = targetId;
+    if (noteId === null) {
+      const ids = await anki(url, "findNotes", { query: "added:1" });
+      if (!Array.isArray(ids) || !ids.length) {
+        return { ok: false, error: "No card was added today. Create the card with Yomitan first, then mine." };
+      }
+      noteId = Math.max(...ids);
     }
-    const noteId = Math.max(...ids);
     const infos = await anki(url, "notesInfo", { notes: [noteId] });
     const fields = (infos && infos[0] && infos[0].fields) || {};
+    if (targetId !== null) {
+      // The note was picked by id, not by the viewer: make sure it really is about this subtitle
+      // before writing media into it.
+      const guardName = String(settings.ankiSentenceField || "").trim() || "Sentence";
+      const written = normalizeSentence((fields[guardName] && fields[guardName].value) || "");
+      const spoken = normalizeSentence(cue.text);
+      if (written && spoken && !written.includes(spoken) && !spoken.includes(written)) {
+        return { ok: false, mismatch: true, error: "The new card's sentence does not match the subtitle; nothing attached" };
+      }
+    }
     const update = {};
     const missing = [];
     if (image) {
       if (settings.ankiImageField in fields) {
-        await anki(url, "storeMediaFile", { filename: image.filename, data: image.base64 });
-        update[settings.ankiImageField] = `<img src="${image.filename}">`;
+        const stored = await storeMedia(url, image.filename, image.base64);
+        update[settings.ankiImageField] = `<img src="${stored}">`;
       } else {
         missing.push(settings.ankiImageField);
       }
     }
     if (audio) {
       if (settings.ankiAudioField in fields) {
-        await anki(url, "storeMediaFile", { filename: audio.filename, data: audio.base64 });
-        update[settings.ankiAudioField] = `[sound:${audio.filename}]`;
+        const stored = await storeMedia(url, audio.filename, audio.base64);
+        update[settings.ankiAudioField] = `[sound:${stored}]`;
       } else {
         missing.push(settings.ankiAudioField);
       }
@@ -158,10 +258,10 @@ async function addToAnki(settings, cue, image, audio) {
       if (!existing) update[sentenceField] = cue.text;
     }
     if (!Object.keys(update).length) {
-      return { ok: false, error: `The newest card has none of the fields ${missing.join(", ")}. Check the field names in the popup.` };
+      return { ok: false, error: `The ${what} card has none of the fields ${missing.join(", ")}. Check the field names in the popup.` };
     }
     await anki(url, "updateNoteFields", { note: { id: noteId, fields: update } });
-    let message = `Added ${Object.keys(update).join(" + ")} to the newest Anki card`;
+    let message = `Added ${Object.keys(update).join(" + ")} to the ${what} Anki card`;
     if (missing.length) message += ` (no field named ${missing.join(", ")})`;
     return { ok: true, target: "anki", noteId, message };
   } catch (err) {
@@ -226,8 +326,9 @@ async function mineCue(msg) {
 
   let result;
   if (settings.mineTarget === "anki") {
-    result = await addToAnki(settings, cue, image, audio);
-    if (!result.ok && settings.mineFallbackDownload) {
+    result = await addToAnki(settings, cue, image, audio, msg.noteId);
+    // Automatic mining never writes files: a failure the viewer did not ask for must stay quiet.
+    if (!result.ok && !msg.auto && settings.mineFallbackDownload) {
       const fallback = await downloadFiles(image, audio);
       if (fallback.ok) {
         fallback.message = `Anki: ${result.error} Saved to Downloads instead.`;
@@ -255,6 +356,8 @@ browser.runtime.onMessage.addListener((msg) => {
       return saveSettings(msg.settings);
     case "mine":
       return mineCue(msg);
+    case "ankiPoll":
+      return ankiPoll();
     default:
       return undefined;
   }

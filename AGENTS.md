@@ -51,8 +51,37 @@ began, so the next window re-transcribes it whole. Word timestamps split segment
 Japanese punctuation (`split_segment()`). These functions are pure; test them by importing the
 module (register it in `sys.modules` before `exec_module` because of `from __future__ import annotations`).
 
+## How automatic mining works
+
+`ankiPoll()` in `addon/background.js` watches AnkiConnect so the viewer never presses anything:
+the content script asks once per sync tick (visible tab, no ad, not already mining) and the
+background answers with the id of a note Yomitan has just created. Four rules keep it from
+touching the wrong card.
+
+- Baseline. Every poll remembers the highest `findNotes("added:1")` id. It reports nothing when
+  that baseline cannot be trusted: first poll, previous poll failed, or more than 10 s since the
+  previous successful one. Notes added while Anki was closed or no video was open stay untouched.
+- One at a time. Two or more ids above the baseline mean an import or a sync, not a lookup, so
+  the baseline moves and nothing is reported.
+- Sentence guard. `addToAnki()` with an explicit note id compares `normalizeSentence()` of the
+  note's sentence field (`ankiSentenceField`, else `Sentence`) with the cue text; unless one
+  contains the other it returns `{ mismatch: true }` and writes nothing. Yomitan's `<b>` around
+  the looked-up word and any spacing difference normalise away.
+- No downloads fallback. `mineCue` with `auto: true` never falls back to the Downloads folder: a
+  failure the viewer did not ask for must not scatter files.
+
+Polls are throttled to one request per 900 ms (several tabs poll the same background), and the
+`requestPermission` handshake is retried at most once a minute until Anki grants it. Poll errors
+are logged with `console.debug`, never toasted. The screenshot comes from `state.hoverFrame`,
+captured on `mouseenter` of the subtitle, so the card shows the frame the viewer was reading and
+not whatever is on screen a Yomitan lookup later.
+
 ## Commands
 
+Nix (any Linux with flakes, NixOS): `nix run . -- [options]` starts the server with CUDA
+(`flake.nix`; CTranslate2 comes prebuilt from `cache.nixos-cuda.org`, onnxruntime is the CPU build
+because only the VAD uses it). `nix run .#check`, `nix run .#tests`, `nix build .#addon`,
+`nix develop` for a shell with Python, web-ext, Node and Deno. `.#server-cpu` is the CUDA-free variant.
 Native server (Windows): `server\setup.cmd` once, then `server\run.cmd [options]`.
 Native server (Linux/macOS): `bash server/setup.sh`, then `server/run.sh`.
 Diagnostics: `server\run.cmd --check`.
@@ -78,10 +107,6 @@ pip install -r server/requirements-test.txt && python -m pytest server/tests
 node --test addon/tests/*.test.js
 ```
 
-Nix (any Linux with flakes, NixOS): `nix run . -- [options]` starts the server with CUDA
-(`flake.nix`; CTranslate2 comes prebuilt from `cache.nixos-cuda.org`, onnxruntime is the CPU build
-because only the VAD uses it). `nix run .#check`, `nix run .#tests`, `nix build .#addon`,
-`nix develop` for a shell with Python, web-ext, Node and Deno. `.#server-cpu` is the CUDA-free variant.
 `server/tests/_serverlib.py` loads `server.py` the way this file already recommends above
 (`sys.modules` registration before `exec_module`). `addon/tests/_loadBackground.js` runs
 `background.js` in a Node `vm` sandbox with `browser`/`fetch`/`btoa` stubbed out — top-level

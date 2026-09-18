@@ -18,6 +18,8 @@ const SHISUKO_DEFAULT_SETTINGS = Object.freeze({
   showStatus: true,
   // sentence mining
   mineTarget: "anki", // "anki" (newest card via AnkiConnect) or "download"
+  // Attach screenshot + audio automatically when a new Anki note appears while a video is open.
+  autoMine: true,
   mineFallbackDownload: true,
   ankiUrl: "http://127.0.0.1:8765",
   ankiImageField: "Picture",

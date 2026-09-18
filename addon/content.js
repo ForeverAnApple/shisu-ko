@@ -11,7 +11,8 @@
  *    extensions such as Yomitan can scan it; pause the video while the text is hovered
  *  - optional transcript panel listing every cue (also plain text)
  *  - sentence mining: grab the current video frame and ask the background script to
- *    fetch the matching audio clip and file both into Anki or the Downloads folder
+ *    fetch the matching audio clip and file both into Anki or the Downloads folder, either on
+ *    demand or by itself as soon as Yomitan has added a card
  */
 
 (() => {
@@ -26,6 +27,10 @@
   const RESUME_DELAY_MS = 350;
   const TOAST_MS = 3500;
   const MINE_RECENT_WINDOW_S = 6;
+  const HOVER_FRAME_MAX_AGE_MS = 60000;
+  const HOVER_CAPTURE_DELAY_MS = 400;
+  const ANKI_POLL_LOG_MS = 60000;
+  const HOVER_POLL_INTERVAL_MS = 300; // a card is most likely to appear while a subtitle is hovered
 
   const state = {
     settings: Object.assign({}, DEFAULT_SETTINGS),
@@ -60,6 +65,10 @@
     lastPointer: { x: 0, y: 0 },
     syncInFlight: false,
     mining: false,
+    hoverFrame: null, // frame grabbed when the subtitle was hovered: the moment the viewer read it
+    hoverCaptureTimer: null,
+    ankiPollInFlight: false,
+    lastAnkiPollLog: 0,
     resizeObserver: null,
     videoListeners: null,
     lastSeekSync: 0,
@@ -316,6 +325,8 @@
     state.transcriptAppendFrom = null;
     state.hoverPaused = false;
     state.awaitingPlayerMove = false;
+    state.hoverFrame = null;
+    clearHoverCapture();
     clearResumeTimer();
     setSubtitle(null);
     renderTranscript();
@@ -380,6 +391,7 @@
     if (typeof data.next === "number") state.since = data.next;
     updateStatus();
     render();
+    if (s.autoMine) pollForNewCard();
   }
 
   function mergeCues(incoming) {
@@ -669,6 +681,53 @@
     }
   }
 
+  function captureHoverFrame() {
+    // The frame to attach is the one on screen when the viewer hovered the line, but reading a
+    // video frame back from the GPU stalls the main thread, so wait until Yomitan's scan has run
+    // and encode off the main thread. With hover-pause on, the frame is the same anyway.
+    clearHoverCapture();
+    const key = state.activeCueKey;
+    if (!key || !state.video || (state.hoverFrame && state.hoverFrame.cueId === key)) return;
+    state.hoverCaptureTimer = setTimeout(() => {
+      state.hoverCaptureTimer = null;
+      if (state.activeCueKey !== key || !state.video) return;
+      captureFrameAsync(state.video).then((dataUrl) => {
+        if (dataUrl && state.activeCueKey === key) state.hoverFrame = { cueId: key, dataUrl, at: Date.now() };
+      });
+    }, HOVER_CAPTURE_DELAY_MS);
+  }
+
+  function clearHoverCapture() {
+    if (state.hoverCaptureTimer) {
+      clearTimeout(state.hoverCaptureTimer);
+      state.hoverCaptureTimer = null;
+    }
+  }
+
+  function captureFrameAsync(video) {
+    return new Promise((resolve) => {
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      if (!w || !h) return resolve(null);
+      const scale = Math.min(1, 1280 / w);
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(w * scale);
+      canvas.height = Math.round(h * scale);
+      try {
+        canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob((blob) => {
+          if (!blob) return resolve(null);
+          const reader = new FileReader();
+          reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : null);
+          reader.onerror = () => resolve(null);
+          reader.readAsDataURL(blob);
+        }, "image/jpeg", 0.85);
+      } catch (err) {
+        resolve(null); // DRM-protected streams taint the canvas
+      }
+    });
+  }
+
   function seekTo(video, t) {
     // Setting currentTime to the position the media is already at fires no "seeked" event, so
     // the wait below would only end at the fallback timeout. Nothing to do in that case.
@@ -689,29 +748,36 @@
 
   async function mineCue(cue, options) {
     if (!cue || state.mining || !state.video || !state.videoId) return;
+    const opts = options || {};
     state.mining = true;
-    showToast("Mining…", "info", 15000);
+    showToast(opts.auto ? "Attaching to the new card…" : "Mining…", "info", 15000);
     try {
       const video = state.video;
       let restore = null;
-      if (options && options.seekForFrame) {
+      if (opts.seekForFrame) {
         restore = { t: video.currentTime, paused: video.paused };
         video.pause();
         await seekTo(video, Math.min(cue.end, cue.start + 0.4));
       }
-      const imageDataUrl = captureFrame(video);
+      const hover = state.hoverFrame;
+      const useHover = opts.auto && hover && hover.cueId === String(cue.id) && Date.now() - hover.at < HOVER_FRAME_MAX_AGE_MS;
+      const imageDataUrl = useHover ? hover.dataUrl : captureFrame(video);
       if (restore) {
         await seekTo(video, restore.t);
         if (!restore.paused) video.play().catch(() => {});
       }
-      resumeAfterMining(video);
+      // Automatic mining leaves playback alone: the viewer is probably still in Yomitan's popup.
+      if (!opts.auto) resumeAfterMining(video);
       const result = await sendMessage({
         type: "mine",
         videoId: state.videoId,
         cue: { start: cue.start, end: cue.end, text: cue.text },
         imageDataUrl,
+        noteId: opts.noteId,
+        auto: !!opts.auto,
       });
       if (result && result.ok) showToast(result.message || "Mined", result.warning ? "warn" : "ok");
+      else if (result && result.mismatch) showToast(result.error, "warn", 6000);
       else showToast("Mining failed: " + ((result && result.error) || "unknown error"), "error", 6000);
     } catch (err) {
       showToast("Mining failed: " + String((err && err.message) || err), "error", 6000);
@@ -730,6 +796,40 @@
     video.play().catch(() => {});
   }
 
+  // Ask the background whether Yomitan just created a card. Riding on the sync loop keeps the
+  // polling to tabs that have a video open and are being watched.
+  async function pollForNewCard() {
+    if (state.mining || state.ankiPollInFlight) return;
+    if (document.visibilityState !== "visible" || isAdPlaying()) return;
+    state.ankiPollInFlight = true;
+    let res;
+    try {
+      res = await sendMessage({ type: "ankiPoll" });
+    } finally {
+      state.ankiPollInFlight = false;
+    }
+    if (!res) return;
+    // Anki being closed or not having granted access is normal; it must not raise toasts.
+    if (!res.ok) logAnkiPollError(res.error);
+    else if (res.newNoteId) autoMine(res.newNoteId);
+  }
+
+  function logAnkiPollError(error) {
+    const now = Date.now();
+    if (now - state.lastAnkiPollLog < ANKI_POLL_LOG_MS) return;
+    state.lastAnkiPollLog = now;
+    console.debug("Shisu-ko: Anki watch:", error || "unknown error");
+  }
+
+  function autoMine(noteId) {
+    const cue = currentCueForMining();
+    if (!cue) {
+      showToast("New card detected but no subtitle to attach", "warn");
+      return;
+    }
+    mineCue(cue, { seekForFrame: false, noteId, auto: true });
+  }
+
   function mineCurrent() {
     const cue = currentCueForMining();
     if (!cue) {
@@ -744,6 +844,7 @@
   function onSubtitleEnter() {
     clearResumeTimer();
     state.awaitingPlayerMove = false;
+    captureHoverFrame();
     if (!state.settings.pauseOnHover || !state.video) return;
     if (!state.video.paused && !state.video.ended) {
       state.video.pause();
@@ -752,6 +853,7 @@
   }
 
   function onSubtitleLeave(ev) {
+    clearHoverCapture();
     if (!state.hoverPaused) return;
     const related = ev.relatedTarget;
     // Leaving towards a dictionary popup (an iframe, or anything that is not part of the
@@ -812,6 +914,9 @@
     setInterval(discover, DISCOVER_INTERVAL_MS);
     setInterval(sync, SYNC_INTERVAL_MS);
     setInterval(render, RENDER_INTERVAL_MS);
+    setInterval(() => {
+      if (state.settings.autoMine && !state.offline && (state.hoverPaused || state.awaitingPlayerMove)) pollForNewCard();
+    }, HOVER_POLL_INTERVAL_MS);
     document.addEventListener("yt-navigate-finish", () => setTimeout(discover, 50));
     document.addEventListener("fullscreenchange", () => setTimeout(updateFontSize, 100));
   });

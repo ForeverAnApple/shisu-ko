@@ -78,7 +78,8 @@ function loadBackground(overrides = {}) {
   // scripts run against the same context — so a second script can still see them by name and
   // copy them onto globalThis for the test harness to read.
   new vm.Script(
-    "globalThis.DEFAULT_SETTINGS = DEFAULT_SETTINGS; globalThis.REQUEST_TIMEOUT_MS = REQUEST_TIMEOUT_MS;",
+    "globalThis.DEFAULT_SETTINGS = DEFAULT_SETTINGS; globalThis.REQUEST_TIMEOUT_MS = REQUEST_TIMEOUT_MS;" +
+      " globalThis.ankiWatch = ankiWatch;",
     { filename: SOURCE_PATH }
   ).runInContext(sandbox);
 

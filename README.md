@@ -21,9 +21,9 @@ both into the Anki card you just made.
   dictionary) scans them. Hovering pauses the video; moving into the dictionary popup keeps it
   paused; moving back over the video resumes.
 - **Transcript panel** with every line so far. Click a timestamp to jump there.
-- **Sentence mining.** The mine button on a subtitle, on any transcript line, or Alt+Shift+M
-  captures a screenshot and an MP3 clip of that sentence and either attaches them to the newest
-  Anki card via AnkiConnect or saves them to your Downloads folder.
+- **Sentence mining.** A screenshot and an MP3 clip of the sentence go into the card Yomitan just
+  made, by themselves. The mine button on a subtitle, on any transcript line, or Alt+Shift+M does
+  the same on demand, into the newest Anki card or into your Downloads folder.
 - **Your hardware, your choice of model.** Whisper large-v3 by default; one flag switches to
   `kotoba-whisper-v2.0-faster` (Japanese-specialised, about 6x faster) or a small CPU model.
 - **Native or Docker.** A one-time setup script on Windows/Linux/macOS, or a container with
@@ -134,7 +134,7 @@ timestamps seek the video.
 
 Mining captures two things for the sentence you are looking at: a screenshot of the video frame
 and an MP3 clip of the sentence audio, cut from the original track with a little padding on both
-sides. Three ways to trigger it:
+sides. It runs by itself the moment Yomitan adds a card. To trigger it by hand instead:
 
 - hover the subtitle and click the pickaxe button that appears at its right edge,
 - press Alt+Shift+M while watching,
@@ -143,19 +143,27 @@ sides. Three ways to trigger it:
 
 Where the material goes is a popup setting:
 
-**Anki (default).** Shisu-ko talks to AnkiConnect, finds the card added most recently today, and
-fills its image and audio fields. This matches the usual Yomitan workflow:
+**Anki (default).** Normally you never trigger mining at all:
 
-1. Hover a word, click Yomitan's **+** to create the card (Yomitan fills the word, reading,
-   sentence and glossary from its own template).
-2. Press Alt+Shift+M. Shisu-ko uploads `shisuko_<video>_<time>.jpg` and `.mp3` to Anki's media
-   folder and writes `<img src=...>` and `[sound:...]` into the fields.
+1. Hover the subtitle; the video pauses.
+2. Scan the word with Yomitan and click its **+** (Yomitan fills word, reading, sentence and
+   glossary from its own template).
+3. Within a second Shisu-ko notices the new card and uploads `shisuko_<video>_<time>.jpg` and
+   `.mp3` to Anki's media folder, writing `<img src=...>` and `[sound:...]` into the fields. The
+   screenshot is the frame that was on screen when you hovered the line, and playback is left
+   alone so you can keep reading the popup.
+
+Shisu-ko only touches a card that appeared while you were watching, and only when its sentence
+matches the subtitle, so an import or a card made elsewhere is never overwritten. Turn the
+watching off with **Attach automatically…** in the popup; the shortcut and the pickaxe keep
+working either way, and they attach to the newest card added today.
 
 The first time, Anki shows a dialog asking whether to allow the extension; click **Yes**.
 Field names default to `Picture` and `SentenceAudio` (as used by common Japanese mining note
 types); change them in the popup to match your note type. An optional sentence field is filled
 with the subtitle text only when it is empty, so it never overwrites what Yomitan wrote. If Anki
-is not running, the files are saved to Downloads instead (can be turned off).
+is not running, mining by hand saves the files to Downloads instead (can be turned off); the
+automatic path stays quiet and writes nothing.
 
 **Downloads.** Files are saved to `Downloads/shisu-ko-mining/`, ready to drag into any card.
 
@@ -172,6 +180,7 @@ uses port 8790 precisely so that AnkiConnect can keep its default 8765.
 | Hide YouTube's own captions | Avoids two subtitle layers |
 | Show progress messages | The status badge; errors are always shown |
 | Font size, keep subtitle after speech ends | Presentation; the linger time keeps short lines readable |
+| Attach automatically when Yomitan adds a card | Watches AnkiConnect and fills the new card by itself; off means Alt+Shift+M or the pickaxe |
 | Send screenshot and audio to | Anki (newest card) or Downloads |
 | AnkiConnect URL, image/audio/sentence field | AnkiConnect connection and note fields |
 | Audio padding, audio format | Extra time around the sentence; MP3 or WAV |
@@ -273,6 +282,8 @@ AGENTS.md             architecture notes, invariants and gotchas for contributor
 
 ## Development
 
+- Nix: `nix develop` gives the Python environment, `web-ext`, Node and Deno; `nix run .#tests`
+  runs both test suites; `nix build .#addon` produces the extension zip.
 - Extension: `node --check addon/*.js`, `npx web-ext lint --source-dir addon`,
   `npx web-ext build --source-dir addon --artifacts-dir dist --ignore-files "tests/**"` (the tests folder is not shipped).
 - Server: `python -W error -c "import ast; ast.parse(open('server/server.py').read())"`,
@@ -282,8 +293,6 @@ AGENTS.md             architecture notes, invariants and gotchas for contributor
 - Data lives in `~/.shisu-ko` (override with `SHISUKO_HOME`): `venv/`, `models/`, `cache/`.
 
 ## Tests
-- Nix: `nix develop` gives the Python environment, `web-ext`, Node and Deno; `nix run .#tests`
-  runs both test suites; `nix build .#addon` produces the extension zip.
 
 Automated tests cover the pure logic on both sides — no GPU, network or Firefox required — and
 run in CI (see the badge at the top of this file) on every push and pull request via
