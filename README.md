@@ -94,11 +94,12 @@ Temporary install (until Firefox restarts):
 1. Open `about:debugging#/runtime/this-firefox`.
 2. Click **Load Temporary Add-on…** and choose `addon/manifest.json`.
 
-Permanent install: regular Firefox only keeps signed add-ons. Get a free API key at
-[addons.mozilla.org](https://addons.mozilla.org/developers/addon/api/key/), run `sign-addon.cmd`
-(unlisted channel, nobody else sees it) and open the signed `.xpi` from `dist\`. Firefox
-Developer Edition, Nightly and ESR can instead load the unsigned zip with
-`xpinstall.signatures.required` set to `false` in `about:config`.
+Permanent install: download the signed `shisu-ko-<version>-signed.xpi` from the
+[latest release](https://github.com/Multysquid/shisu-ko/releases/latest) and open it in Firefox.
+Regular Firefox only keeps signed add-ons; the signed build is produced with `sign-addon.cmd`
+and a free [addons.mozilla.org API key](https://addons.mozilla.org/developers/addon/api/key/)
+(unlisted channel, nobody else sees it). Firefox Developer Edition, Nightly and ESR can instead
+load the unsigned zip with `xpinstall.signatures.required` set to `false` in `about:config`.
 
 ### 3. Watch
 
