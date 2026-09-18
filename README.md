@@ -100,6 +100,8 @@ Temporary install (until Firefox restarts):
 
 1. Open `about:debugging#/runtime/this-firefox`.
 2. Click **Load Temporary Add-on…** and choose `addon/manifest.json`.
+3. Firefox asks for access to youtube.com the first time you open the popup; click **Allow on
+   YouTube** (or right-click the toolbar icon > Always Allow on www.youtube.com).
 
 Permanent install: download the signed `shisu-ko-<version>-signed.xpi` from the
 [latest release](https://github.com/Multysquid/shisu-ko/releases/latest) and open it in Firefox.
@@ -239,6 +241,7 @@ The extension does not change between native and Docker; both listen on `127.0.0
 
 | Symptom | Fix |
 |---|---|
+| No subtitles until the toolbar icon is clicked | Firefox has not granted access to youtube.com yet. Open the popup and click **Allow on YouTube**. |
 | Badge says "Shisu-ko server offline" | Start `server\run.cmd` or `docker\up.cmd`. Check the server URL in the popup. |
 | First start sits at "Loading Whisper model" for a long time | The 3 GB download runs at your connection speed. Hugging Face's xet transfer mode is disabled because it stalled on Windows; set `HF_HUB_DISABLE_XET=0` to try it. |
 | "yt-dlp needs Node.js or Deno" | Install [Node.js](https://nodejs.org/) 20+ or [Deno](https://deno.com/), then restart the server. |

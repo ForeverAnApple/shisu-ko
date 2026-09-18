@@ -47,6 +47,44 @@ h2 {
   color: #b42318;
 }
 
+.banner {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid #f0c2bb;
+  border-left-width: 3px;
+  border-radius: 4px;
+  background: #fdf3f1;
+  color: #b42318;
+}
+
+.banner p {
+  margin: 0;
+  font-size: 12px;
+}
+
+.banner button {
+  font: inherit;
+  align-self: flex-start;
+  padding: 4px 10px;
+  border: 1px solid #b42318;
+  border-radius: 4px;
+  background: #fff;
+  color: #b42318;
+  cursor: pointer;
+}
+
+.banner button:hover {
+  background: #b42318;
+  color: #fff;
+}
+
+.hidden {
+  display: none;
+}
+
 main {
   padding: 4px 14px 10px;
   display: flex;

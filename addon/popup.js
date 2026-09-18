@@ -3,6 +3,11 @@
 // Every setting has an input with the same id in popup.html (checked by addon/tests/settings.test.js).
 const FIELDS = Object.keys(SHISUKO_DEFAULT_SETTINGS);
 
+// Firefox MV3 treats host permissions as optional: nothing is granted at install, so the content
+// script never runs until the user allows youtube.com (clicking the toolbar icon only grants the
+// current tab, for that visit). The banner makes the missing grant visible and fixable.
+const YOUTUBE_ORIGINS = ["*://www.youtube.com/*", "*://m.youtube.com/*", "*://youtube.com/*"];
+
 let saveTimer = null;
 
 function readField(el) {
@@ -53,7 +58,38 @@ async function checkServer() {
   }
 }
 
+// Reloading the open YouTube tabs is what actually injects the content script; a freshly granted
+// permission does not reach pages that are already loaded.
+async function reloadYouTubeTabs() {
+  try {
+    // tabs.query with a url filter needs the "tabs" permission to match against URLs.
+    const tabs = await browser.tabs.query({ url: YOUTUBE_ORIGINS });
+    for (const tab of tabs) await browser.tabs.reload(tab.id);
+  } catch (err) {
+    /* nothing to reload if the query is refused */
+  }
+}
+
+async function setupPermissionBanner() {
+  const banner = document.getElementById("permission-banner");
+  const button = document.getElementById("grant-permission");
+  try {
+    if (await browser.permissions.contains({ origins: YOUTUBE_ORIGINS })) return;
+    banner.classList.remove("hidden");
+  } catch (err) {
+    return; // no permissions API (older Firefox): leave the banner hidden
+  }
+  button.addEventListener("click", async () => {
+    // request() must be called straight from the click handler; it needs the user gesture.
+    const granted = await browser.permissions.request({ origins: YOUTUBE_ORIGINS }).catch(() => false);
+    if (!granted) return;
+    banner.classList.add("hidden");
+    await reloadYouTubeTabs();
+  });
+}
+
 async function init() {
+  setupPermissionBanner();
   const settings = await browser.runtime.sendMessage({ type: "getSettings" });
   for (const key of FIELDS) {
     const el = document.getElementById(key);
