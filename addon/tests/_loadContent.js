@@ -16,8 +16,8 @@ const SOURCE_PATH = path.join(__dirname, "..", "content.js");
 const OPEN = "(() => {";
 const CLOSE = "})();";
 const EXPORTS =
-  "  return { state, shouldSync, coveredEnd, findActiveCue, sentenceForCue, getVideoIdFromUrl," +
-  " mergeCues, cueById, ankiPollAllowed, currentCueForMining };\n";
+  "  return { state, shouldSync, coveredEnd, findActiveCue, jumpTarget, sentenceForCue," +
+  " getVideoIdFromUrl, mergeCues, cueById, ankiPollAllowed, currentCueForMining };\n";
 
 function instrument(source) {
   const open = source.indexOf(OPEN);
@@ -57,7 +57,7 @@ function loadContent(overrides = {}) {
     Set,
     Date,
     Promise,
-    window: {},
+    window: { addEventListener: () => {}, removeEventListener: () => {} },
     location: { href: overrides.href || "https://www.youtube.com/watch?v=abcdef1234" },
     document: {
       documentElement: stubElement(),

@@ -16,6 +16,8 @@ const SHISUKO_DEFAULT_SETTINGS = Object.freeze({
   showTranscript: false,
   hideNativeCaptions: false,
   showStatus: true,
+  // Left/Right jump to the previous/next subtitle instead of YouTube's 5 s seek.
+  arrowKeysJumpCues: true,
   // subtitle style and position. The defaults reproduce the look before these settings existed.
   subPosition: 11, // % of the player height between the bottom edge and the subtitle box
   subFont: "default", // "default" | "rounded" | "mincho" | "gothic-bold"

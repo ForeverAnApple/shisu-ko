@@ -112,6 +112,50 @@ test("findActiveCue picks the cue at the playhead and lingers past the last one"
   assert.equal(api.findActiveCue(9), null);
 });
 
+// ------------------------------------------------------------------ jumpTarget
+
+// Three lines with a gap between the second and the third.
+const JUMP_CUES = [
+  { id: 0, start: 0, end: 2, text: "いち" },
+  { id: 1, start: 5, end: 7, text: "に" },
+  { id: 2, start: 20, end: 22, text: "さん" },
+];
+
+test("jumpTarget replays the current line once the viewer is a second into it", () => {
+  const { api } = loadContent();
+  assert.equal(api.jumpTarget(JUMP_CUES, 6.5, -1), 4.85); // 5 - the 0.15 s lead-in
+  assert.equal(api.jumpTarget(JUMP_CUES, 9, -1), 4.85); // still the last line that started
+});
+
+test("jumpTarget steps back to the line before when the current one just started", () => {
+  const { api } = loadContent();
+  assert.equal(api.jumpTarget(JUMP_CUES, 5.5, -1), 0); // 0.5 s in: the viewer meant the line before
+  assert.equal(api.jumpTarget(JUMP_CUES, 6, -1), 0); // exactly 1.0 s in is not yet a replay
+  assert.equal(api.jumpTarget(JUMP_CUES, 20.5, -1), 4.85);
+});
+
+test("jumpTarget lands on the start of the video before the first line", () => {
+  const { api } = loadContent();
+  assert.equal(api.jumpTarget(JUMP_CUES, 0.5, -1), 0); // inside the first cue, less than a second
+  assert.equal(api.jumpTarget(JUMP_CUES, 1.5, -1), 0); // replaying cue 0 clamps to 0 as well
+  assert.equal(api.jumpTarget(JUMP_CUES, -1, -1), 0); // before every cue
+});
+
+test("jumpTarget moves to the next line, or reports none ahead", () => {
+  const { api } = loadContent();
+  assert.equal(api.jumpTarget(JUMP_CUES, 0, 1), 4.85);
+  assert.equal(api.jumpTarget(JUMP_CUES, 6, 1), 19.85);
+  assert.equal(api.jumpTarget(JUMP_CUES, 10, 1), 19.85); // in the gap: the next line still counts
+  assert.equal(api.jumpTarget(JUMP_CUES, 20, 1), null); // on the last line, nothing ahead
+  assert.equal(api.jumpTarget(JUMP_CUES, 60, 1), null);
+});
+
+test("jumpTarget with no cues rewinds to the start and reports nothing ahead", () => {
+  const { api } = loadContent();
+  assert.equal(api.jumpTarget([], 42, -1), 0);
+  assert.equal(api.jumpTarget([], 42, 1), null);
+});
+
 // ------------------------------------------------------------------ Anki polling
 
 test("ankiPollAllowed polls a playing video and stops on a hidden tab", () => {

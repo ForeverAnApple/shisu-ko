@@ -121,6 +121,7 @@ server stays ahead of you. The toolbar popup holds all settings.
 | Alt+Shift+S | Toggle subtitles |
 | Alt+Shift+T | Toggle the transcript panel |
 | Alt+Shift+M | Mine the current sentence (screenshot + audio) |
+| ← / → | Jump to the previous / next subtitle (Left replays the current line when more than a second in; turn off in the popup) |
 
 Shortcuts can be changed in Firefox under Add-ons and themes > Manage Extension Shortcuts.
 

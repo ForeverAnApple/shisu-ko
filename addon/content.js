@@ -44,6 +44,11 @@
   const HOVER_POLL_INTERVAL_MS = 300; // a card is most likely to appear while a subtitle is hovered
   // A blank shorter than this reads as a flicker rather than a pause, so the text is held instead.
   const MIN_BLANK_S = 0.3;
+  // Left this far into a line replays it instead of stepping back to the one before.
+  const CUE_REPLAY_S = 1.0;
+  const CUE_LEAD_IN_S = 0.15;
+  // Elements whose own arrow key handling wins: text entry, YouTube's search box, the comments.
+  const KEY_SKIP_SELECTOR = "input, textarea, select, [contenteditable], #search, ytd-comments";
 
   // ---- subtitle style ----
   const GOTHIC_STACK = '"Noto Sans JP", "Noto Sans CJK JP", "Yu Gothic UI", "Yu Gothic", "Meiryo", "Hiragino Sans", sans-serif';
@@ -128,6 +133,8 @@
     detach();
     clearHoverCapture();
     clearResumeTimer();
+    // An orphaned instance must stop swallowing arrow keys; the fresh one owns them now.
+    window.removeEventListener("keydown", onKeyDown, true);
     if (state.root) state.root.remove();
     state.root = null;
     document.documentElement.classList.remove("shisuko-hide-native");
@@ -653,6 +660,63 @@
     return t <= until ? last : null;
   }
 
+  // Where Left/Right should land. Pure: `cues` sorted by start, `t` the playhead, `direction`
+  // -1 or +1. Returns the time to seek to, or null when nothing lies that way (only possible
+  // going forward; backwards always has the start of the video). Left replays the current line
+  // once the viewer is more than a second into it, the way asbplayer does, and steps back to the
+  // line before it otherwise. Every target starts a shade early so the first syllable survives.
+  function jumpTarget(cues, t, direction) {
+    const list = cues || [];
+    const target = t + 0.05;
+    let idx = -1; // the last cue that has already started
+    for (let lo = 0, hi = list.length - 1; lo <= hi; ) {
+      const mid = (lo + hi) >> 1;
+      if (list[mid].start <= target) {
+        idx = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    if (direction > 0) {
+      const next = list[idx + 1];
+      return next ? leadIn(next.start) : null;
+    }
+    const cur = list[idx];
+    if (cur && t - cur.start > CUE_REPLAY_S) return leadIn(cur.start);
+    const prev = idx > 0 ? list[idx - 1] : null;
+    return prev ? leadIn(prev.start) : 0;
+  }
+
+  function leadIn(start) {
+    return Math.max(0, start - CUE_LEAD_IN_S);
+  }
+
+  function onKeyDown(ev) {
+    if (!state.settings.arrowKeysJumpCues) return;
+    if (ev.ctrlKey || ev.altKey || ev.metaKey || ev.shiftKey) return;
+    const direction = ev.key === "ArrowLeft" ? -1 : ev.key === "ArrowRight" ? 1 : 0;
+    if (!direction) return;
+    const video = state.video;
+    if (!video) return;
+    // Typing in the search box or a comment: the arrows belong to the caret.
+    const el = ev.target;
+    if (el && typeof el.closest === "function" && el.closest(KEY_SKIP_SELECTOR)) return;
+    const to = jumpTarget(state.cues, Number(video.currentTime) || 0, direction);
+    if (to === null) return; // no cue ahead: leave YouTube's five second seek alone
+    // YouTube listens on the player while the event bubbles, so the capture phase is not enough
+    // on its own; killing the rest of the dispatch here is what keeps the 5 s seek from firing.
+    ev.preventDefault();
+    ev.stopImmediatePropagation();
+    const playing = !video.paused;
+    // A jump is the viewer taking over, exactly as onPlay treats a manual resume.
+    state.hoverPaused = false;
+    state.awaitingPlayerMove = false;
+    clearResumeTimer();
+    video.currentTime = to;
+    if (playing) video.play().catch(() => {});
+  }
+
   function render() {
     const video = state.video;
     if (!video || !state.subText || !state.settings.enabled) return;
@@ -1148,6 +1212,7 @@
     timers.push(setInterval(() => {
       if (state.hoverPaused || state.awaitingPlayerMove) pollForNewCard();
     }, HOVER_POLL_INTERVAL_MS));
+    window.addEventListener("keydown", onKeyDown, true);
     document.addEventListener("yt-navigate-finish", () => {
       // YouTube swaps the player on navigation: the cached element must be looked up again.
       state.rediscover = true;
