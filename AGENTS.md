@@ -51,6 +51,11 @@ began, so the next window re-transcribes it whole. Word timestamps split segment
 Japanese punctuation (`split_segment()`). These functions are pure; test them by importing the
 module (register it in `sys.modules` before `exec_module` because of `from __future__ import annotations`).
 
+Before the whole track is decoded (seconds for a long video), `Fetcher.make_preview()` decodes a
+minute around the playhead into `Session.preview` (`(offset, samples)`) and marks the session
+ready; `plan_window()` then only plans inside the preview and `audio_slice()` serves it. The
+full decode replaces it with `Session.audio` and clears the preview.
+
 ## How automatic mining works
 
 `ankiPoll()` in `addon/background.js` watches AnkiConnect so the viewer never presses anything:

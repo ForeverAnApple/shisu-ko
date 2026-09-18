@@ -174,7 +174,11 @@ class Session:
     error: Optional[str] = None
     title: str = ""
     duration: float = 0.0
+    duration_hint: float = 0.0  # length reported by yt-dlp, used before the container is opened
     audio: Optional[np.ndarray] = None
+    # (offset_seconds, samples): a short decode around the playhead that lets transcription start
+    # before the whole track has been decoded. Dropped once `audio` holds everything.
+    preview: Optional[tuple] = None
     cues: list = field(default_factory=list)
     covered: list = field(default_factory=list)
     want_t: float = 0.0
@@ -196,9 +200,23 @@ class Session:
         )
 
 
+def audio_slice(s: Session, start: float, end: float) -> Optional[np.ndarray]:
+    """Samples for [start, end): from the full decode, or from the preview while that is all there is."""
+    if s.audio is not None:
+        return s.audio[int(start * SAMPLE_RATE): int(end * SAMPLE_RATE)]
+    if s.preview is None:
+        return None
+    offset, samples = s.preview
+    a = int(round((start - offset) * SAMPLE_RATE))
+    b = int(round((end - offset) * SAMPLE_RATE))
+    if a < 0 or b > len(samples) or b <= a:
+        return None
+    return samples[a:b]
+
+
 def plan_window(s: Session, args) -> Optional[tuple]:
     """Pick the next [start, end) window to transcribe for a session, or None if idle."""
-    if s.status != "ready" or s.audio is None or s.duration <= 0:
+    if s.status != "ready" or (s.audio is None and s.preview is None) or s.duration <= 0:
         return None
     t = min(max(0.0, s.want_t), s.duration)
     cov = find_covering(s.covered, t)
@@ -216,6 +234,14 @@ def plan_window(s: Session, args) -> Optional[tuple]:
     nxt = next_start_after(s.covered, start + 0.01)
     if nxt is not None:
         end = min(end, nxt)
+    if s.audio is None:
+        # Only the preview exists: stay inside it, and leave anything outside for the full decode.
+        offset, samples = s.preview
+        preview_end = offset + len(samples) / SAMPLE_RATE
+        if start < offset or start >= preview_end:
+            return None
+        end = min(end, preview_end)
+        return (start, end) if end - start >= 1.5 else None
     if end - start < 1.5:
         s.covered = merge_intervals(s.covered + [[start, end]])
         return None
@@ -261,6 +287,22 @@ def find_cached_audio(video_id: str) -> Optional[Path]:
     for p in CACHE_DIR.glob(f"{video_id}.*"):
         if p.suffix.lower() in AUDIO_SUFFIXES and p.is_file() and p.stat().st_size > 0:
             return p
+    return None
+
+
+def probe_duration(path: Path) -> Optional[float]:
+    """Length of an audio file from its container header, available long before it is decoded."""
+    import av
+
+    try:
+        with av.open(str(path)) as container:
+            stream = container.streams.audio[0]
+            if stream.duration:
+                return float(stream.duration * stream.time_base)
+            if container.duration:
+                return float(container.duration) / av.time_base
+    except Exception as exc:  # noqa: BLE001
+        log.debug("could not read the duration of %s: %s", path, exc)
     return None
 
 
@@ -313,6 +355,9 @@ class Fetcher:
                 log.info("[%s] using cached audio %s", s.video_id, path.name)
             with s.lock:
                 s.status = "decoding"
+            # Decoding a 40-minute track takes seconds; a few windows around the playhead take
+            # milliseconds, so the first subtitles appear before the full decode finishes.
+            self.make_preview(s, path)
             from faster_whisper.audio import decode_audio
 
             audio = decode_audio(str(path), sampling_rate=SAMPLE_RATE)
@@ -320,6 +365,7 @@ class Fetcher:
             with s.lock:
                 s.audio = audio
                 s.duration = float(len(audio)) / SAMPLE_RATE
+                s.preview = None
                 s.status = "ready"
             log.info("[%s] audio ready, %s long%s", s.video_id, fmt_time(s.duration), f": {s.title}" if s.title else "")
         except Exception as exc:  # noqa: BLE001
@@ -332,6 +378,30 @@ class Fetcher:
             with s.lock:
                 s.fetching = False
 
+    def make_preview(self, s: Session, path: Path) -> None:
+        """Decode a couple of windows around the playhead so the transcriber can start right away."""
+        try:
+            duration = probe_duration(path) or s.duration_hint
+            if not duration or duration <= 0:
+                return  # unknown length: plan_window cannot work, so skip the preview entirely
+            with s.lock:
+                start = max(0.0, s.want_t - 1.0)
+            end = min(float(duration), start + self.args.first_window + self.args.window + 2.0)
+            if end - start < 1.5:
+                return
+            samples = _decode_range(path, start, end, rate=SAMPLE_RATE)
+            if len(samples) < SAMPLE_RATE * 1.5:
+                return
+            preview = np.ascontiguousarray(samples, dtype=np.float32) / 32768.0
+            with s.lock:
+                s.preview = (start, preview)
+                s.duration = float(duration)
+                s.status = "ready"
+            log.info("[%s] preview %s-%s ready while the full audio decodes",
+                     s.video_id, fmt_time(start), fmt_time(start + len(preview) / SAMPLE_RATE))
+        except Exception as exc:  # noqa: BLE001
+            log.debug("[%s] preview decode skipped: %s", s.video_id, exc)
+
     def download(self, s: Session) -> Path:
         import yt_dlp
 
@@ -340,8 +410,10 @@ class Fetcher:
             info = ydl.extract_info(url, download=False)
             if info.get("is_live"):
                 raise RuntimeError("Live streams are not supported yet")
+            hint = info.get("duration")
             with s.lock:
                 s.title = info.get("title") or ""
+                s.duration_hint = float(hint) if isinstance(hint, (int, float)) else 0.0
             try:
                 ydl.process_ie_result(info, download=True)
             except Exception as exc:  # noqa: BLE001
@@ -482,9 +554,9 @@ class Transcriber(threading.Thread):
     def process(self, s: Session, start: float, end: float) -> None:
         args = self.app.args
         with s.lock:
-            if s.audio is None:
+            audio = audio_slice(s, start, end)
+            if audio is None:
                 return
-            audio = s.audio[int(start * SAMPLE_RATE): int(end * SAMPLE_RATE)]
             s.busy = [round(start, 2), round(end, 2)]
             boundary_free = end < s.duration - 0.05 and find_covering(s.covered, end + 0.01, tol=0.0) is None
 
@@ -584,6 +656,7 @@ class App:
                 out.append({
                     "video_id": s.video_id, "status": s.status, "title": s.title, "duration": s.duration,
                     "cues": len(s.cues), "covered": s.covered, "want_t": s.want_t, "busy": s.busy,
+                    "preview": s.preview is not None,
                     "idle_seconds": round(time.time() - s.last_sync, 1),
                 })
         return {"ok": True, "sessions": out}
@@ -677,6 +750,7 @@ class App:
             with s.lock:
                 if s.status == "ready" and s.audio is not None and now - s.last_sync > self.args.idle_minutes * 60:
                     s.audio = None
+                    s.preview = None
                     s.status = "evicted"
                     log.info("[%s] released audio after %d idle minutes", s.video_id, self.args.idle_minutes)
 
