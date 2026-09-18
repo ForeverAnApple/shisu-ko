@@ -313,7 +313,7 @@ run in CI (see the badge at the top of this file) on every push and pull request
 [`.github/workflows/tests.yml`](.github/workflows/tests.yml).
 
 **Server** (`server/tests/`): window planning (`plan_window`), interval merging, cue splitting
-(`split_segment`), timestamp formatting, error message mapping, and the on-disk cue cache.
+(`build_cues`, the hallucination gates), timestamp formatting, error message mapping, and the on-disk cue cache.
 
 ```
 pip install -r server/requirements-test.txt

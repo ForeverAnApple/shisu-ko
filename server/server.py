@@ -35,6 +35,7 @@ import threading
 import time
 import uuid
 import wave
+import zlib
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -47,6 +48,9 @@ APP_DIR = Path(os.environ.get("SHISUKO_HOME") or (Path.home() / ".shisu-ko"))
 CACHE_DIR = APP_DIR / "cache"
 MODELS_DIR = APP_DIR / "models"
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,20}$")
+CACHE_FORMAT = 2  # bumped when cue fields change; older caches are ignored and transcribed again
+SPEECH_SYNC_BACK = 30.0   # seconds of speech intervals sent behind the playhead
+SPEECH_SYNC_AHEAD = 120.0  # ... and ahead of it
 AUDIO_SUFFIXES = {".webm", ".m4a", ".opus", ".mp4", ".mp3", ".ogg", ".oga", ".wav", ".mka", ".aac"}
 
 log = logging.getLogger("shisu-ko")
@@ -121,44 +125,429 @@ CLAUSE_BREAK = set("、,，")
 JUNK_RE = re.compile(r"^[\s\W_]*$")
 
 
-def split_segment(seg, offset: float, max_chars: int, max_seconds: float) -> list:
-    """Turn one Whisper segment into subtitle-sized (start, end, text) cues using word timestamps."""
-    text = (seg.text or "").strip()
-    if not text:
-        return []
-    words = list(getattr(seg, "words", None) or [])
+# --------------------------------------------------------------------------- speech intervals (VAD)
+
+# Silero settings, see docs/subtitle-quality.md (P0.1). The library's own defaults leave
+# min_speech_duration_ms at 0, so single 32 ms transients (drums, synth stabs) reach the decoder.
+VAD_PARAMS = {
+    "threshold": 0.5,
+    "neg_threshold": 0.35,
+    "min_speech_duration_ms": 250,
+    "min_silence_duration_ms": 300,
+    "speech_pad_ms": 200,
+}
+# faster-whisper forces max_speech_duration_s to the 30 s encoder window when vad_parameters is a
+# dict, so our own pass must use the same value to produce exactly the same intervals.
+VAD_MAX_SPEECH_SECONDS = 30.0
+
+
+def vad_parameters() -> dict:
+    """A fresh dict for transcribe(); the library pops keys out of the one it is given."""
+    return dict(VAD_PARAMS)
+
+
+def detect_speech(audio, offset: float = 0.0) -> list:
+    """Silero speech intervals of one window, in absolute seconds."""
+    from faster_whisper.vad import VadOptions, get_speech_timestamps
+
+    options = VadOptions(**VAD_PARAMS, max_speech_duration_s=VAD_MAX_SPEECH_SECONDS)
+    chunks = get_speech_timestamps(audio, options, sampling_rate=SAMPLE_RATE)
+    return [[offset + c["start"] / SAMPLE_RATE, offset + c["end"] / SAMPLE_RATE] for c in chunks]
+
+
+def interval_overlap(start: float, end: float, intervals) -> float:
+    """Seconds of [start, end) covered by a sorted, merged interval list."""
+    total = 0.0
+    for a, b in intervals:
+        if b <= start:
+            continue
+        if a >= end:
+            break
+        total += min(end, b) - max(start, a)
+    return total
+
+
+def speech_ratio(start: float, end: float, intervals) -> float:
+    """Share of [start, end) that is speech; 0.0 for an empty range."""
+    if end <= start:
+        return 0.0
+    return interval_overlap(start, end, intervals) / (end - start)
+
+
+def distance_to_speech(t: float, intervals) -> float:
+    """Seconds from t to the nearest speech interval; 0.0 when no intervals are known."""
+    if not intervals:
+        return 0.0
+    best = float("inf")
+    for a, b in intervals:
+        if a <= t <= b:
+            return 0.0
+        best = min(best, a - t if t < a else t - b)
+    return best
+
+
+def next_silence(t: float, intervals) -> tuple:
+    """(start, end) of the first silence at or after t; end is inf when no speech follows."""
+    if not intervals:
+        return (t, float("inf"))
+    start = t
+    for a, b in intervals:
+        if a <= t < b:
+            start = b
+            break
+    nxt = next_start_after(intervals, start)
+    return (start, nxt if nxt is not None else float("inf"))
+
+
+def silence_around(start: float, end: float, intervals) -> tuple:
+    """Silence before and after an utterance, measured from its own speech interval outwards.
+
+    An unknown neighbour (nothing in this window before or after) counts as no silence, so the
+    isolation test stays conservative at window edges.
+    """
+    if not intervals:
+        return (0.0, 0.0)
+    left, right = start, end
+    for a, b in intervals:
+        if a <= start <= b:
+            left = min(left, a)
+        if a <= end <= b:
+            right = max(right, b)
+    prev_end = max((b for _, b in intervals if b <= left), default=None)
+    nxt = next_start_after(intervals, right)
+    return (left - prev_end if prev_end is not None else 0.0,
+            nxt - right if nxt is not None else 0.0)
+
+
+def nearest_onset(intervals, t: float, reach: float):
+    """Start of the speech interval t belongs to, but only when t sits near that start.
+
+    A cue in the middle of a long speech interval must not be dragged back to its onset, so
+    anything further than `reach` into an interval is left alone.
+    """
+    for a, b in intervals:
+        if a - reach <= t <= min(b, a + reach):
+            return a
+    return None
+
+
+# --------------------------------------------------------------------------- hallucination gates
+
+@dataclass
+class Word:
+    word: str
+    start: float
+    end: float
+    probability: float = 1.0
+
+
+# Whisper's stock sign-offs. Real videos say these too, so they only count against a segment that
+# also fails the VAD or isolation test below.
+BLOCKLIST_PHRASES = (
+    "ご視聴ありがとうございました",
+    "ご視聴ありがとうございます",
+    "ご清聴ありがとうございました",
+    "ご覧いただきありがとうございます",
+    "チャンネル登録",
+    "おやすみなさい",
+    "字幕by",
+    "字幕 by",
+    "字幕提供",
+    "字幕視聴",
+)
+BLOCKLIST_MAX_OVERLAP = 0.8   # above this the cue sits on real speech and is kept
+BLOCKLIST_ISOLATION = 3.0     # seconds of silence on both sides that make a sign-off suspicious
+VAD_GATE_OVERLAP = 0.5
+VAD_GATE_CHARS = 8            # a long, confident segment survives a low overlap
+VAD_GATE_PROB = 0.5
+ANOMALY_MAX_OVERLAP = 0.8
+COMPRESSION_LIMIT = 2.2
+REPEAT_MIN_RUN = 6     # a unit repeated this many times back to back is a loop whatever it says
+REPEAT_MIN_REPS = 3    # three repeats only count as a loop when they fill a line
+REPEAT_MIN_CHARS = 16
+
+
+def absolute_words(seg, offset: float) -> list:
+    """The segment's words shifted onto the video's timeline."""
+    return [
+        Word(w.word, offset + float(w.start), offset + float(w.end), float(getattr(w, "probability", 1.0) or 0.0))
+        for w in (getattr(seg, "words", None) or [])
+    ]
+
+
+PUNCTUATION = set("\"'“¿([{-。！？、，,.!?:：;；)]}、…～~ー'\"")
+
+
+def word_anomaly_score(word: Word) -> float:
+    """Port of faster_whisper.transcribe.word_anomaly_score (1.2.1, MIT): long, short or improbable words."""
+    score = 0.0
+    duration = word.end - word.start
+    if word.probability < 0.15:
+        score += 1.0
+    if duration < 0.133:
+        score += (0.133 - duration) * 15
+    if duration > 2.0:
+        score += duration - 2.0
+    return score
+
+
+def is_segment_anomaly(words) -> bool:
+    """Port of faster_whisper.transcribe.is_segment_anomaly (1.2.1, MIT)."""
+    words = [w for w in words if w.word.strip() and w.word.strip() not in PUNCTUATION][:8]
     if not words:
-        return [(offset + float(seg.start), offset + float(seg.end), text)]
+        return False
+    score = sum(word_anomaly_score(w) for w in words)
+    return score >= 3 or score + 0.01 >= len(words)
 
-    cues: list = []
+
+def compression_ratio(text: str) -> float:
+    data = text.encode("utf-8")
+    return len(data) / len(zlib.compress(data)) if data else 0.0
+
+
+def has_repetition(text: str) -> bool:
+    """True when a substring repeats back to back often enough to be a decoder loop.
+
+    Measured, not guessed: the doc's "3 repeats of 2 characters" also deletes ordinary Japanese
+    backchannels (そうそうそう, 違う違う違う, あるあるある - 15 genuine lines in a 76-minute sample),
+    so a loop must either repeat REPEAT_MIN_RUN times or fill REPEAT_MIN_CHARS characters.
+    """
+    t = "".join(text.split())
+    n = len(t)
+    for size in range(1, n // 2 + 1):
+        i = 0
+        while i <= n - 2 * size:
+            unit = t[i:i + size]
+            reps, j = 1, i + size
+            while t[j:j + size] == unit:
+                reps += 1
+                j += size
+            if reps >= REPEAT_MIN_RUN or (reps >= REPEAT_MIN_REPS and reps * size >= REPEAT_MIN_CHARS):
+                return True
+            i = j if reps > 1 else i + 1
+    return False
+
+
+def hallucination_reason(seg, words, speech):
+    """Name of the gate that rejects this segment, or None when it passes. See P0.2 of the doc."""
+    text = (getattr(seg, "text", "") or "").strip()
+    if not words or not text or JUNK_RE.match(text):
+        return "empty"
+
+    start, end = words[0].start, words[-1].end
+    overlap = speech_ratio(start, end, speech)
+    mean_prob = sum(w.probability for w in words) / len(words)
+    if overlap < VAD_GATE_OVERLAP and not (len(text) >= VAD_GATE_CHARS and mean_prob >= VAD_GATE_PROB):
+        return "vad"
+    if overlap < ANOMALY_MAX_OVERLAP and is_segment_anomaly(words):
+        return "anomaly"
+    # seg.compression_ratio is faster-whisper's value for the whole 30 s decode, shared by every
+    # segment it produced, so one loop would take its innocent neighbours with it. Use this text.
+    if has_repetition(text) or compression_ratio(text) > COMPRESSION_LIMIT:
+        return "repetition"
+    if any(p in text for p in BLOCKLIST_PHRASES):
+        before, after = silence_around(start, end, speech)
+        if overlap < BLOCKLIST_MAX_OVERLAP or (before >= BLOCKLIST_ISOLATION and after >= BLOCKLIST_ISOLATION):
+            return "blocklist"
+    return None
+
+
+# --------------------------------------------------------------------------- cue building
+
+@dataclass
+class CueLimits:
+    """Cue geometry from docs/subtitle-quality.md (P1); seconds unless the name says chars."""
+    max_chars: int = 30          # 26 = 13 x 2 lines (Netflix JP); 30 keeps mined sentences whole
+    max_seconds: float = 6.0
+    min_seconds: float = 0.8     # Netflix's general minimum
+    hard_min_seconds: float = 0.5  # the Japanese floor: never go below this
+    clause_ratio: float = 0.6    # a 、 breaks the line once the buffer is this full
+    lead_in: float = 0.08
+    lead_out: float = 0.50
+    min_gap: float = 0.10
+    dead_zone: float = 0.50      # gaps between min_gap and this read as a glitch, so they are closed
+    pause_split: float = 0.45
+    vad_silence: float = 0.35    # a pause only splits when this much of it is real silence
+    merge_gap: float = 0.35      # adjacent cues closer than this merge
+    merge_reach: float = 1.0     # a too-short cue may merge with a neighbour this far away
+    trim_slack: float = 0.15     # edge words whose midpoint is this far outside speech are dropped
+    snap_reach: float = 0.60
+    lead_out_silence: float = 0.40
+
+
+def cue_limits(args) -> CueLimits:
+    return CueLimits(
+        max_chars=int(getattr(args, "max_cue_chars", 30)),
+        max_seconds=float(getattr(args, "max_cue_seconds", 6.0)),
+        min_seconds=float(getattr(args, "min_cue_seconds", 0.8)),
+    )
+
+
+def word_text(words) -> str:
+    return "".join(w.word for w in words).strip()
+
+
+def trim_words(words, speech, slack: float) -> list:
+    """Drop edge words whose midpoint lies outside every speech interval (P1.1).
+
+    Whisper stretches the first and last word of a segment; those are exactly the two timestamps
+    the cue in and out times come from.
+    """
+    if not speech:
+        return list(words)
+    lo, hi = 0, len(words)
+    while lo < hi and distance_to_speech((words[lo].start + words[lo].end) / 2, speech) > slack:
+        lo += 1
+    while hi > lo and distance_to_speech((words[hi - 1].start + words[hi - 1].end) / 2, speech) > slack:
+        hi -= 1
+    return list(words[lo:hi])
+
+
+def split_at_clause(buf, limits: CueLimits) -> tuple:
+    """Back a hard break off to the last clause boundary inside the final 40% of the buffer (P1.2)."""
+    total = len(word_text(buf))
+    best = None
+    for j in range(len(buf) - 1):
+        text = word_text(buf[:j + 1])
+        if text and len(text) >= total * limits.clause_ratio and text[-1] in (SENTENCE_END | CLAUSE_BREAK):
+            best = j + 1
+    return (buf[:best], buf[best:]) if best else (buf, [])
+
+
+def group_words(words, speech, limits: CueLimits) -> list:
+    """Cut a word list into cue-sized groups: sentence end, VAD pause, clause, then hard limits."""
+    groups: list = []
     buf: list = []
-
-    def flush():
-        if not buf:
-            return
-        joined = "".join(w.word for w in buf).strip()
-        if joined:
-            cues.append((offset + float(buf[0].start), offset + float(buf[-1].end), joined))
-        buf.clear()
-
-    for w in words:
+    for i, w in enumerate(words):
+        if buf:
+            gap = w.start - words[i - 1].end
+            silent = gap - interval_overlap(words[i - 1].end, w.start, speech)
+            if gap >= limits.pause_split and silent >= limits.vad_silence:
+                groups.append(buf)
+                buf = []
         buf.append(w)
-        joined = "".join(x.word for x in buf).strip()
-        n = len(joined)
-        duration = float(buf[-1].end) - float(buf[0].start)
-        last = joined[-1:]
-        if (last in SENTENCE_END and n >= 8) or n >= max_chars or duration >= max_seconds:
-            flush()
-        elif last in CLAUSE_BREAK and n >= max_chars * 0.6:
-            flush()
-    flush()
+        text = word_text(buf)
+        if not text:
+            continue
+        if text[-1] in SENTENCE_END:
+            groups.append(buf)
+            buf = []
+        elif text[-1] in CLAUSE_BREAK and len(text) >= limits.max_chars * limits.clause_ratio:
+            groups.append(buf)
+            buf = []
+        elif len(text) >= limits.max_chars or buf[-1].end - buf[0].start >= limits.max_seconds:
+            head, buf = split_at_clause(buf, limits)
+            groups.append(head)
+    if buf:
+        groups.append(buf)
+    return [g for g in groups if word_text(g) and not JUNK_RE.match(word_text(g))]
 
-    # Fold a tiny trailing fragment into the previous cue.
-    if len(cues) >= 2 and len(cues[-1][2]) < 4:
-        a, _, t1 = cues[-2]
-        _, b, t2 = cues[-1]
-        cues[-2:] = [(a, b, t1 + t2)]
+
+def merge_adjacent(cues, limits: CueLimits, max_gap: float, only_short: bool) -> list:
+    """Fold neighbouring cues together while they stay inside the char and duration limits."""
+    out: list = []
+    for cue in cues:
+        if out:
+            prev = out[-1]
+            gap = cue["start"] - prev["end"]
+            short = (prev["end"] - prev["start"] < limits.min_seconds
+                     or cue["end"] - cue["start"] < limits.min_seconds)
+            if (gap <= max_gap and (short or not only_short)
+                    and len(prev["text"]) + len(cue["text"]) <= limits.max_chars
+                    and cue["end"] - prev["start"] <= limits.max_seconds):
+                prev["end"] = cue["end"]
+                prev["text"] = prev["text"] + cue["text"]
+                continue
+        out.append(dict(cue))
+    return out
+
+
+def normalise_gaps(cues, limits: CueLimits) -> list:
+    """Close gaps that are long enough to see but too short to read as deliberate (P1.7)."""
+    for prev, nxt in zip(cues, cues[1:]):
+        gap = nxt["start"] - prev["end"]
+        if gap < 0:
+            # Overlapping cues beat a 50 ms flash, so an overlap only closes when the earlier cue
+            # stays readable afterwards.
+            trimmed = nxt["start"] - limits.min_gap
+            if trimmed - prev["start"] >= limits.hard_min_seconds:
+                prev["end"] = trimmed
+        elif limits.min_gap < gap < limits.dead_zone:
+            prev["end"] = nxt["start"] - limits.min_gap
     return cues
+
+
+def build_cues(words, speech, limits: CueLimits) -> list:
+    """One Whisper segment's words -> display-ready cues [{start, end, text}] (P1 rules 1-7)."""
+    words = trim_words(words, speech, limits.trim_slack)
+    cues = []
+    for group in group_words(words, speech, limits):
+        start = group[0].start
+        onset = nearest_onset(speech, start, limits.snap_reach)
+        if onset is not None:  # P1.3: cue in at the speech onset, not at Whisper's first word
+            start = min(max(start, onset - limits.lead_in), onset + 0.30)
+        cues.append({"start": start, "end": max(group[-1].end, start + 0.01), "text": word_text(group)})
+
+    for i, cue in enumerate(cues):
+        ceiling = cues[i + 1]["start"] - limits.min_gap if i + 1 < len(cues) else float("inf")
+        sil_start, sil_end = next_silence(cue["end"], speech)
+        silence = sil_end - sil_start
+        if silence >= limits.lead_out_silence:  # P1.4: cue out a beat after the audio
+            cue["end"] += min(limits.lead_out, silence - 0.1)
+        if cue["end"] - cue["start"] < limits.min_seconds:  # P1.5: grow into the trailing silence
+            cue["end"] = min(max(cue["end"], cue["start"] + limits.min_seconds), sil_end - limits.min_gap)
+        cue["end"] = min(cue["end"], max(ceiling, cue["start"] + limits.hard_min_seconds))
+
+    cues = merge_adjacent(cues, limits, limits.merge_reach, only_short=True)   # P1.5 merge
+    cues = merge_adjacent(cues, limits, limits.merge_gap, only_short=False)    # P1.6 anti-flicker
+    for cue in cues:
+        if cue["end"] - cue["start"] < limits.hard_min_seconds:
+            cue["end"] = cue["start"] + limits.hard_min_seconds
+    return normalise_gaps(cues, limits)
+
+
+def cue_overlaps(a, b, share: float = 0.5) -> bool:
+    """True when two cues share more than `share` of the shorter one (P1.8 dedup)."""
+    inter = min(a["end"], b["end"]) - max(a["start"], b["start"])
+    shorter = min(a["end"] - a["start"], b["end"] - b["start"])
+    return shorter > 0 and inter > share * shorter
+
+
+def build_window_cues(segs, offset: float, speech, limits: CueLimits, seg_id: int, drops=None,
+                      window_end: Optional[float] = None) -> tuple:
+    """Gate hallucinated segments, build their cues and stamp each with its segment id.
+
+    `seg` ties every cue back to the sentence Whisper heard, so mining can rejoin the cues that
+    a display-sized split pulled apart. Returns (cues, next segment id).
+    """
+    out: list = []
+    for seg in segs:
+        words = absolute_words(seg, offset)
+        reason = hallucination_reason(seg, words, speech)
+        if reason:
+            if drops is not None:
+                drops[reason] = drops.get(reason, 0) + 1
+                drops.setdefault("_text", []).append((reason, (getattr(seg, "text", "") or "").strip()))
+            continue
+        cues = build_cues(words, speech, limits)
+        if not cues:
+            if drops is not None:
+                drops["trimmed"] = drops.get("trimmed", 0) + 1
+            continue
+        for cue in cues:
+            cue["seg"] = seg_id
+        out += cues
+        seg_id += 1
+    if window_end is not None:
+        # This window owns [offset, window_end); the next one re-transcribes from there, so a
+        # lead-out reaching past it would overlap a cue that does not exist yet.
+        out = [c for c in out if c["start"] < window_end - 0.05]
+        for cue in out:
+            cue["end"] = min(cue["end"], max(window_end, cue["start"] + limits.hard_min_seconds))
+    for cue in out:
+        cue["start"] = round(cue["start"], 2)
+        cue["end"] = round(max(cue["end"], cue["start"] + 0.05), 2)
+    return normalise_gaps(sorted(out, key=lambda c: c["start"]), limits), seg_id
 
 
 # --------------------------------------------------------------------------- sessions
@@ -181,6 +570,8 @@ class Session:
     preview: Optional[tuple] = None
     cues: list = field(default_factory=list)
     covered: list = field(default_factory=list)
+    speech: list = field(default_factory=list)  # merged Silero intervals, absolute seconds
+    seg_next: int = 0  # next Whisper-segment id; cues of one segment share it (see build_window_cues)
     want_t: float = 0.0
     last_sync: float = field(default_factory=time.time)
     busy: Optional[list] = None
@@ -636,13 +1027,20 @@ class Transcriber(threading.Thread):
 
         t0 = time.time()
         try:
+            # Our own Silero pass over the same audio and the same options the decoder gets, so the
+            # cue builder can snap to, extend into and judge cues against the intervals it heard.
+            speech = detect_speech(audio, offset=start)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[%s] VAD failed (%s); treating the whole window as speech", s.video_id, exc)
+            speech = [[start, end]]
+        try:
             segments, _info = self.app.model.transcribe(
                 audio,
                 language=args.language,
                 task="transcribe",
                 beam_size=args.beam_size,
                 vad_filter=True,
-                vad_parameters={"min_silence_duration_ms": 400, "speech_pad_ms": 200},
+                vad_parameters=vad_parameters(),
                 word_timestamps=True,
                 condition_on_previous_text=False,
                 initial_prompt=args.initial_prompt or None,
@@ -650,6 +1048,7 @@ class Transcriber(threading.Thread):
                 no_speech_threshold=0.6,
                 log_prob_threshold=-1.0,
                 compression_ratio_threshold=2.4,
+                hallucination_silence_threshold=2.0,
             )
             segs = list(segments)
         except Exception as exc:  # noqa: BLE001
@@ -669,29 +1068,32 @@ class Transcriber(threading.Thread):
             dropped = segs.pop()
             new_end = min(end, max(start + 1.0, start + float(dropped.start)))
 
-        fresh = []
-        for seg in segs:
-            for a, b, text in split_segment(seg, start, args.max_cue_chars, args.max_cue_seconds):
-                if JUNK_RE.match(text):
-                    continue
-                fresh.append({"start": round(a, 2), "end": round(max(b, a + 0.4), 2), "text": text})
+        drops: dict = {}
+        with s.lock:
+            seg_id = s.seg_next
+        fresh, seg_id = build_window_cues(segs, start, speech, cue_limits(args), seg_id, drops, new_end)
 
         added = 0
         with s.lock:
             recent = s.cues[-80:]
             for cue in fresh:
-                if any(abs(r["start"] - cue["start"]) < 0.3 and r["text"] == cue["text"] for r in recent):
+                if any(cue_overlaps(cue, r) for r in recent):
                     continue
                 cue["id"] = len(s.cues)
                 s.cues.append(cue)
                 recent.append(cue)
                 added += 1
+            s.seg_next = seg_id
             s.covered = merge_intervals(s.covered + [[start, new_end]])
+            s.speech = merge_intervals(
+                s.speech + [[max(a, start), min(b, new_end)] for a, b in speech if min(b, new_end) > max(a, start)])
             s.busy = None
         elapsed = time.time() - t0
+        gated = ", ".join(f"{k}:{v}" for k, v in sorted(drops.items()) if not k.startswith("_"))
         log.info(
-            "[%s] %s-%s: %d cues in %.1fs (%.0fx realtime)",
-            s.video_id, fmt_time(start), fmt_time(new_end), added, elapsed, (new_end - start) / max(elapsed, 1e-3),
+            "[%s] %s-%s: %d cues in %.1fs (%.0fx realtime)%s",
+            s.video_id, fmt_time(start), fmt_time(new_end), added, elapsed,
+            (new_end - start) / max(elapsed, 1e-3), f" [dropped {gated}]" if gated else "",
         )
         self.app.save_cache(s)
 
@@ -767,6 +1169,9 @@ class App:
                 "duration": s.duration,
                 "title": s.title,
                 "covered": [[round(a, 2), round(b, 2)] for a, b in s.covered],
+                # Only the intervals around the playhead: the whole list would be resent every second.
+                "speech": [[round(a, 2), round(b, 2)] for a, b in s.speech
+                           if b >= s.want_t - SPEECH_SYNC_BACK and a <= s.want_t + SPEECH_SYNC_AHEAD],
                 "cues": s.cues[since:],
                 "next": len(s.cues),
                 "busy": s.busy,
@@ -840,9 +1245,13 @@ class App:
         s.title = data.get("title") or ""
         if data.get("model") != self.args.model or data.get("language") != self.args.language:
             return  # cues from another model are not reused, the title is
+        if data.get("format") != CACHE_FORMAT:
+            return  # older caches have no segment ids, so they are transcribed again
         s.cues = [c for c in data.get("cues", []) if isinstance(c, dict)]
         for i, c in enumerate(s.cues):
             c["id"] = i
+        s.seg_next = max((int(c.get("seg", -1)) for c in s.cues), default=-1) + 1
+        s.speech = merge_intervals(data.get("speech", []))
         s.covered = merge_intervals(data.get("covered", []))
         s.duration = float(data.get("duration") or 0.0)
         if s.fully_covered():
@@ -853,8 +1262,10 @@ class App:
         with s.lock:
             data = {
                 "video_id": s.video_id, "title": s.title, "duration": s.duration,
+                "format": CACHE_FORMAT,
                 "model": self.args.model, "language": self.args.language,
                 "cues": list(s.cues), "covered": [list(iv) for iv in s.covered],
+                "speech": [[round(a, 2), round(b, 2)] for a, b in s.speech],
             }
         tmp = s.cache_path().with_suffix(".tmp")
         try:
@@ -1143,8 +1554,9 @@ def parse_args(argv=None):
     p.add_argument("--window", type=float, default=40.0, help="seconds of audio transcribed per step (shorter reacts faster to seeking, longer is slightly more efficient)")
     p.add_argument("--first-window", type=float, default=20.0, help="shorter first step after a seek so subtitles appear quickly")
     p.add_argument("--lookahead", type=float, default=900.0, help="stop transcribing this many seconds ahead of the playhead (0 = whole video)")
-    p.add_argument("--max-cue-chars", type=int, default=42)
-    p.add_argument("--max-cue-seconds", type=float, default=7.0)
+    p.add_argument("--max-cue-chars", type=int, default=30, help="26 is the Netflix Japanese limit (13 x 2 lines); 30 keeps more mined sentences whole")
+    p.add_argument("--max-cue-seconds", type=float, default=6.0)
+    p.add_argument("--min-cue-seconds", type=float, default=0.8, help="cues shorter than this are extended or merged")
     p.add_argument("--idle-minutes", type=int, default=30, help="release decoded audio of videos not synced for this long")
     p.add_argument("--retry-after", type=float, default=30.0, help="seconds before a failed audio fetch is retried automatically")
     p.add_argument("--client-timeout", type=float, default=30.0, help="stop transcribing ahead for a video whose tab has not synced for this many seconds (0 = never stop)")

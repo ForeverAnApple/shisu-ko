@@ -47,9 +47,19 @@ sign-addon.cmd   signs the extension through addons.mozilla.org (needs the owner
 inside a covered range, a short `--first-window` (20 s) starts at the playhead; otherwise the next
 `--window` (40 s) continues from the end of the covered range, up to `--lookahead` seconds ahead.
 A segment touching the end of a window is dropped and the covered range ends where that segment
-began, so the next window re-transcribes it whole. Word timestamps split segments into cues at
-Japanese punctuation (`split_segment()`). These functions are pure; test them by importing the
+began, so the next window re-transcribes it whole. These functions are pure; test them by importing the
 module (register it in `sys.modules` before `exec_module` because of `from __future__ import annotations`).
+
+Cue building (`docs/subtitle-quality.md` is the rationale): the server runs Silero VAD itself on each
+window (`speech_intervals()`, min speech 250 ms, min silence 300 ms) and passes the same options to
+faster-whisper. Segments go through gates before becoming cues: no words, VAD overlap under 0.5,
+faster-whisper's own word-anomaly score, repetition loops, and a gated phrase blocklist.
+`build_cues(words, speech, limits)` then trims words outside speech, splits at sentence ends, long
+pauses and `--max-cue-chars`/`--max-cue-seconds`, snaps starts to speech onsets, adds a lead-out into
+following silence, merges fragments below `--min-cue-seconds`, and closes gaps under 0.5 s. Every cue
+carries `seg`, the id of the Whisper segment it came from, so the extension can rejoin a sentence for
+mining. Cue caches are format 2; older caches are ignored. `server/tools/cue_stats.py` and
+`retranscribe.py` measure a cache before and after a change; keep them working.
 
 Before the whole track is decoded (seconds for a long video), `Fetcher.make_preview()` decodes a
 minute around the playhead into `Session.preview` (`(offset, samples)`) and marks the session

@@ -1,4 +1,6 @@
-"""Unit tests for the pure planning / cue-splitting / formatting helpers in server/server.py.
+"""Unit tests for the pure planning / caching / formatting helpers in server/server.py.
+
+The cue builder and the hallucination gates have their own file, test_cues.py.
 
 These do not touch the network, GPU or a real Whisper model: only the functions that are
 plain data in, data out, as called out in the README's Development section.
@@ -18,14 +20,6 @@ def make_args(**overrides):
     base = dict(first_window=20.0, window=40.0, lookahead=900.0)
     base.update(overrides)
     return SimpleNamespace(**base)
-
-
-def make_word(word: str, start: float, end: float):
-    return SimpleNamespace(word=word, start=start, end=end)
-
-
-def make_segment(text: str, start: float, end: float, words=None):
-    return SimpleNamespace(text=text, start=start, end=end, words=words)
 
 
 # --------------------------------------------------------------------------- fmt_time
@@ -130,86 +124,6 @@ def test_friendly_error_uses_class_name_when_message_empty():
         pass
 
     assert server.friendly_error(Boom()) == "Boom"
-
-
-# --------------------------------------------------------------------------- split_segment
-
-def test_split_segment_without_words_returns_single_offset_cue():
-    seg = make_segment("hello", 1.0, 2.0, words=None)
-    cues = server.split_segment(seg, offset=100.0, max_chars=42, max_seconds=7.0)
-    assert cues == [(101.0, 102.0, "hello")]
-
-
-def test_split_segment_empty_text_returns_nothing():
-    seg = make_segment("   ", 0.0, 1.0)
-    assert server.split_segment(seg, offset=0.0, max_chars=42, max_seconds=7.0) == []
-
-
-def test_split_segment_flushes_at_sentence_end():
-    words = [
-        make_word("これは", 0.0, 0.4),
-        make_word("テストです", 0.4, 1.0),
-        make_word("。", 1.0, 1.1),
-    ]
-    seg = make_segment("これはテストです。", 0.0, 1.1, words=words)
-    cues = server.split_segment(seg, offset=0.0, max_chars=42, max_seconds=7.0)
-    assert len(cues) == 1
-    start, end, text = cues[0]
-    assert text == "これはテストです。"
-    assert start == pytest.approx(0.0)
-    assert end == pytest.approx(1.1)
-
-
-def test_split_segment_applies_offset_to_word_timestamps():
-    words = [make_word("あああああああああ", 5.0, 6.0), make_word("。", 6.0, 6.2)]
-    seg = make_segment("あああああああああ。", 5.0, 6.2, words=words)
-    cues = server.split_segment(seg, offset=1000.0, max_chars=42, max_seconds=7.0)
-    assert len(cues) == 1
-    start, end, _ = cues[0]
-    assert start == pytest.approx(1005.0)
-    assert end == pytest.approx(1006.2)
-
-
-def test_split_segment_flushes_on_max_chars_without_punctuation():
-    words = [make_word("あ", float(i), float(i) + 0.5) for i in range(10)]
-    seg = make_segment("あ" * 10, 0.0, 10.0, words=words)
-    cues = server.split_segment(seg, offset=0.0, max_chars=5, max_seconds=100.0)
-    assert len(cues) >= 2
-    assert all(len(text) <= 5 for _, _, text in cues[:-1])
-
-
-def test_split_segment_flushes_on_max_seconds():
-    # Two long (>=4 char, so the trailing-fragment fold does not re-merge them) words with no
-    # punctuation: duration alone should force a flush after each one.
-    words = [make_word("あいうえお", 0.0, 4.0), make_word("かきくけこ", 4.0, 8.0)]
-    seg = make_segment("あいうえおかきくけこ", 0.0, 8.0, words=words)
-    cues = server.split_segment(seg, offset=0.0, max_chars=42, max_seconds=3.0)
-    assert [text for _, _, text in cues] == ["あいうえお", "かきくけこ"]
-
-
-def test_split_segment_flushes_on_clause_break_past_threshold():
-    words = [
-        make_word("ああああああ", 0.0, 0.6),  # 6 chars, threshold = 10 * 0.6 = 6
-        make_word("、", 0.6, 0.7),
-        make_word("いいいい", 0.7, 1.0),  # >=4 chars so the trailing-fragment fold leaves it alone
-    ]
-    seg = make_segment("ああああああ、いいいい", 0.0, 1.0, words=words)
-    cues = server.split_segment(seg, offset=0.0, max_chars=10, max_seconds=100.0)
-    assert [text for _, _, text in cues] == ["ああああああ、", "いいいい"]
-
-
-def test_split_segment_folds_tiny_trailing_fragment_into_previous_cue():
-    words = [
-        make_word("これはテストです", 0.0, 0.9),
-        make_word("。", 0.9, 1.0),
-        make_word("ね", 1.0, 1.2),  # trailing 1-char fragment, never flushed by punctuation
-    ]
-    seg = make_segment("これはテストです。ね", 0.0, 1.2, words=words)
-    cues = server.split_segment(seg, offset=0.0, max_chars=42, max_seconds=100.0)
-    assert len(cues) == 1
-    start, end, text = cues[0]
-    assert text == "これはテストです。ね"
-    assert end == pytest.approx(1.2)
 
 
 # --------------------------------------------------------------------------- JUNK_RE / VIDEO_ID_RE
@@ -343,3 +257,50 @@ def test_app_cache_round_trips_cues_for_matching_model_and_drops_for_different_m
     other_app.load_cache(reloaded_other)
     assert reloaded_other.title == "A great video"
     assert reloaded_other.cues == []
+
+
+def test_app_cache_stores_the_format_version_segment_ids_and_speech(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "CACHE_DIR", tmp_path)
+    args = make_args(model="large-v3", language="ja", idle_minutes=30)
+    app = server.App(args, model=None, device="cpu", compute_type="int8")
+
+    original = server.Session(video_id="abcdefabcdef", url="u")
+    original.cues = [{"start": 0.0, "end": 1.0, "text": "hello", "seg": 0},
+                     {"start": 1.2, "end": 2.0, "text": "world", "seg": 1}]
+    original.covered = [[0.0, 2.0]]
+    original.speech = [[0.0, 2.0]]
+    original.duration = 10.0
+    app.save_cache(original)
+
+    import json
+
+    data = json.loads((tmp_path / "abcdefabcdef.cues.json").read_text(encoding="utf-8"))
+    assert data["format"] == server.CACHE_FORMAT
+    assert data["speech"] == [[0.0, 2.0]]
+
+    reloaded = server.Session(video_id="abcdefabcdef", url="u")
+    app.load_cache(reloaded)
+    assert [c["seg"] for c in reloaded.cues] == [0, 1]
+    assert reloaded.seg_next == 2  # the next window continues the segment numbering
+    assert reloaded.speech == [[0.0, 2.0]]
+
+
+def test_app_cache_ignores_a_cache_without_the_current_format(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "CACHE_DIR", tmp_path)
+    args = make_args(model="large-v3", language="ja", idle_minutes=30)
+    app = server.App(args, model=None, device="cpu", compute_type="int8")
+
+    import json
+
+    # A version 1 cache: right model, no format key, so its cues carry no segment ids.
+    (tmp_path / "abcdefabcdef.cues.json").write_text(json.dumps({
+        "video_id": "abcdefabcdef", "title": "Old", "duration": 10.0,
+        "model": "large-v3", "language": "ja",
+        "cues": [{"start": 0.0, "end": 1.0, "text": "hello"}], "covered": [[0.0, 10.0]],
+    }), encoding="utf-8")
+
+    reloaded = server.Session(video_id="abcdefabcdef", url="u")
+    app.load_cache(reloaded)
+    assert reloaded.title == "Old"  # the title survives, as it does for a model change
+    assert reloaded.cues == []
+    assert reloaded.covered == []
