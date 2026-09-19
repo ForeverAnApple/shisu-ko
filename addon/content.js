@@ -368,7 +368,7 @@
     closeBtn.type = "button";
     closeBtn.className = "shisuko-transcript-close";
     closeBtn.textContent = "×";
-    closeBtn.title = "Hide transcript (Alt+Shift+T)";
+    closeBtn.title = "Hide transcript (Alt+Shift+L)";
     closeBtn.addEventListener("click", () => saveSettings({ showTranscript: false }));
     header.appendChild(title);
     header.appendChild(closeBtn);

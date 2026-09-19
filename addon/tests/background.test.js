@@ -673,6 +673,21 @@ test("downloadFiles hands Firefox object URLs, never data: URLs", async () => {
   assert.equal(revoked.length, 0, "the object URL must live until the download has finished");
 });
 
+test("downloadFiles uses Chrome data URLs in the service worker", async () => {
+  const seen = [];
+  const { sandbox } = loadBackground({
+    runtimeURL: "chrome-extension://test/",
+    download: async (options) => { seen.push(options); return seen.length; },
+    createObjectURL: () => { throw new Error("service workers have no object URLs"); },
+  });
+  const imageBytes = Buffer.from([0, 255, 65]);
+  const res = await sandbox.downloadFiles({ base64: imageBytes.toString("base64"), filename: "a.jpg" }, null);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(seen.length, 1);
+  assert.match(seen[0].url, /^data:image\/jpeg;base64,/);
+  assert.deepEqual(Buffer.from(seen[0].url.split(",", 2)[1], "base64"), imageBytes);
+});
+
 test("downloadFiles revokes the object URL when the download is refused", async () => {
   const revoked = [];
   const { sandbox } = loadBackground({

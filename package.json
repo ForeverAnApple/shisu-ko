@@ -1,0 +1,20 @@
+{
+  "name": "shisu-ko-extension",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:chrome": "node scripts/build.mjs --browser chrome",
+    "build:firefox": "node scripts/build.mjs --browser firefox",
+    "watch": "node scripts/build.mjs --watch",
+    "refresh-icons": "node scripts/refresh-icons.mjs",
+    "test:build": "node --test scripts/tests/*.test.mjs",
+    "test": "node --test addon/tests/*.test.js && npm run test:build",
+    "test:browser": "npm run build:chrome && node scripts/browser-smoke.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
+  }
+}

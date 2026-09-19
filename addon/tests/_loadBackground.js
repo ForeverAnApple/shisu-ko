@@ -80,6 +80,7 @@ function loadBackground(overrides = {}) {
         onChanged: { addListener: () => {}, removeListener: () => {} },
       },
       runtime: {
+        getURL: () => overrides.runtimeURL || "moz-extension://test/",
         onMessage: { addListener: (fn) => listeners.onMessage.push(fn) },
       },
       commands: {
